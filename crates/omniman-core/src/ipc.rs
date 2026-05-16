@@ -1,4 +1,4 @@
-use crate::types::{ClipEntry, Hit};
+use crate::types::{ClipEntry, Hit, ModelEntry};
 use zbus::proxy;
 
 /// The daemon's well-known D-Bus service name.
@@ -21,6 +21,10 @@ pub trait Omniman {
     async fn ask_ai(&self, prompt: &str) -> zbus::Result<String>;
 
     async fn request_show_ui(&self) -> zbus::Result<()>;
+
+    /// Returns models available via the configured Gemini API key.
+    /// Returns an empty vec if no key is configured or the request fails.
+    async fn list_models(&self) -> zbus::Result<Vec<ModelEntry>>;
 
     async fn reindex(&self) -> zbus::Result<()>;
 

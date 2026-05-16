@@ -126,25 +126,6 @@ async fn connect_and_serve(
 
     tracing::info!("connected to omnimand via D-Bus");
 
-    // Prefer OpenAI-compatible endpoint when configured; fall back to Gemini from env.
-    let config = omniman_core::config::Config::load().unwrap_or_default();
-    let openai_client: Option<Arc<omniman_ai::OpenAiClient>> =
-        match (&config.ai.openai_endpoint, &config.ai.openai_key) {
-            (Some(endpoint), Some(key)) if !endpoint.is_empty() && !key.is_empty() => Some(
-                Arc::new(omniman_ai::OpenAiClient::new(
-                    key.clone(),
-                    endpoint.clone(),
-                    config.ai.openai_model.clone(),
-                )),
-            ),
-            _ => None,
-        };
-    let gemini_client: Option<Arc<omniman_ai::GeminiClient>> = if openai_client.is_none() {
-        omniman_ai::GeminiClient::from_env(&config.ai.model).ok().map(Arc::new)
-    } else {
-        None
-    };
-
     let mut show_stream = proxy.receive_show_ui().await.context("subscribing ShowUi")?;
     let mut clip_changed_stream = proxy.receive_clipboard_changed().await.context("subscribing ClipboardChanged")?;
 
@@ -166,9 +147,26 @@ async fn connect_and_serve(
                 if clip_result_tx.send(entries).await.is_err() { break; }
             }
             Ok(prompt) = ai_req_rx.recv() => {
+                // Re-read config on every request so model/endpoint changes from
+                // the prefs window take effect without restarting the process.
+                let config = omniman_core::config::Config::load().unwrap_or_default();
+                let oai: Option<Arc<omniman_ai::OpenAiClient>> =
+                    match (&config.ai.openai_endpoint, &config.ai.openai_key) {
+                        (Some(ep), Some(key)) if !ep.is_empty() && !key.is_empty() => Some(
+                            Arc::new(omniman_ai::OpenAiClient::new(
+                                key.clone(),
+                                ep.clone(),
+                                config.ai.openai_model.clone(),
+                            )),
+                        ),
+                        _ => None,
+                    };
+                let gem: Option<Arc<omniman_ai::GeminiClient>> = if oai.is_none() {
+                    omniman_ai::GeminiClient::from_env(&config.ai.model).ok().map(Arc::new)
+                } else {
+                    None
+                };
                 let result_tx = ai_result_tx.clone();
-                let oai = openai_client.clone();
-                let gem = gemini_client.clone();
                 let proxy_clone = proxy.clone();
                 tokio::spawn(async move {
                     let _ = result_tx.send(AiMsg::Start).await;

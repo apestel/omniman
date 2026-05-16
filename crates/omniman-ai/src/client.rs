@@ -4,6 +4,25 @@ use reqwest::Client;
 use serde::Deserialize;
 use tracing::debug;
 
+pub struct ModelInfo {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Deserialize)]
+struct ModelsResponse {
+    models: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    name: String,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    #[serde(rename = "supportedGenerationMethods", default)]
+    supported_generation_methods: Vec<String>,
+}
+
 #[derive(Deserialize)]
 struct StreamResponse {
     candidates: Option<Vec<Candidate>>,
@@ -39,6 +58,39 @@ impl GeminiClient {
         let key =
             std::env::var("GEMINI_API_KEY").context("GEMINI_API_KEY env var not set")?;
         Ok(Self::new(key, model.to_owned()))
+    }
+
+    /// Fetch all models that support generateContent, sorted by display name.
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models?key={}",
+            self.api_key
+        );
+        let client = &self.client;
+        let resp = client.get(&url).send().await.context("listing Gemini models")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Gemini models API {status}: {text}");
+        }
+
+        let body: ModelsResponse = resp.json().await.context("parsing models response")?;
+        let mut models: Vec<ModelInfo> = body
+            .models
+            .into_iter()
+            .filter(|m| {
+                m.supported_generation_methods
+                    .iter()
+                    .any(|s| s == "generateContent")
+            })
+            .map(|m| ModelInfo {
+                id: m.name.strip_prefix("models/").unwrap_or(&m.name).to_owned(),
+                display_name: m.display_name,
+            })
+            .collect();
+        models.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+        Ok(models)
     }
 
     /// Send a prompt and stream each text chunk to `tx` as it arrives.

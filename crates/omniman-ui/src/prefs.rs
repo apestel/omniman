@@ -96,33 +96,76 @@ fn build_ai_page(win: &libadwaita::PreferencesWindow, config: Rc<RefCell<Config>
         .build();
     page.add(&gemini_group);
 
-    let models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"];
-    let model_list = gtk4::StringList::new(&models);
-
-    let current_idx = {
-        let m = config.borrow().ai.model.clone();
-        models.iter().position(|s| *s == m.as_str()).unwrap_or(0) as u32
-    };
-
     let model_row = libadwaita::ComboRow::builder()
         .title("Model")
-        .model(&model_list)
-        .selected(current_idx)
+        .subtitle("Fetching available models…")
+        .sensitive(false)
         .build();
     gemini_group.add(&model_row);
 
-    model_row.connect_selected_notify({
+    // Fetch available models from the daemon (which holds the API key) and
+    // populate the combo once done. Falls back to a short hardcoded list when
+    // the daemon is unreachable or no key is configured.
+    {
+        let model_row = model_row.clone();
         let config = Rc::clone(&config);
-        move |r| {
-            let model = r
-                .selected_item()
-                .and_downcast::<gtk4::StringObject>()
-                .map(|s| s.string().to_string())
-                .unwrap_or_else(|| models[0].to_string());
-            config.borrow_mut().ai.model = model;
-            let _ = config.borrow().save();
-        }
-    });
+        let current_model = config.borrow().ai.model.clone();
+
+        let (tx, rx) = async_channel::bounded::<Vec<omniman_core::types::ModelEntry>>(1);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            rt.block_on(async move {
+                let models = async {
+                    use omniman_core::ipc::OmnimanProxy;
+                    let conn = zbus::Connection::session().await?;
+                    let proxy = OmnimanProxy::new(&conn).await?;
+                    proxy.list_models().await
+                }
+                .await
+                .unwrap_or_default();
+                let _ = tx.send(models).await;
+            });
+        });
+
+        gtk4::glib::spawn_future_local(async move {
+            const FALLBACK: &[(&str, &str)] = &[
+                ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+                ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+                ("gemini-1.5-flash", "Gemini 1.5 Flash"),
+                ("gemini-1.5-pro", "Gemini 1.5 Pro"),
+            ];
+
+            let fetched = rx.recv().await.unwrap_or_default();
+            let (ids, display_names, subtitle): (Vec<String>, Vec<String>, &str) =
+                if fetched.is_empty() {
+                    let ids = FALLBACK.iter().map(|(id, _)| id.to_string()).collect();
+                    let names = FALLBACK.iter().map(|(_, n)| n.to_string()).collect();
+                    (ids, names, "Daemon unreachable or no GEMINI_API_KEY set")
+                } else {
+                    let ids = fetched.iter().map(|m| m.id.clone()).collect();
+                    let names = fetched.iter().map(|m| m.display_name.clone()).collect();
+                    (ids, names, "")
+                };
+
+            let selected_idx =
+                ids.iter().position(|id| *id == current_model).unwrap_or(0) as u32;
+
+            let display_refs: Vec<&str> = display_names.iter().map(String::as_str).collect();
+            model_row.set_model(Some(&gtk4::StringList::new(&display_refs)));
+            model_row.set_selected(selected_idx);
+            model_row.set_subtitle(subtitle);
+            model_row.set_sensitive(true);
+
+            model_row.connect_selected_notify(move |r| {
+                let idx = r.selected() as usize;
+                if let Some(id) = ids.get(idx) {
+                    config.borrow_mut().ai.model = id.clone();
+                    let _ = config.borrow().save();
+                }
+            });
+        });
+    }
 
     // ── OpenAI-compatible endpoint ────────────────────────────────────────────
     let oai_group = libadwaita::PreferencesGroup::builder()

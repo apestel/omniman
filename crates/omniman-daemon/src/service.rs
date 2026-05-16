@@ -5,7 +5,7 @@ use std::{
 
 use omniman_ai::GeminiClient;
 use omniman_clipboard::ClipboardStore;
-use omniman_core::types::{ClipEntry, Hit};
+use omniman_core::types::{ClipEntry, Hit, ModelEntry};
 use omniman_index::FileIndex;
 use zbus::interface;
 
@@ -49,6 +49,23 @@ impl OmnimanService {
             Err(e) => {
                 tracing::warn!("Gemini error: {e}");
                 format!("Error: {e}")
+            }
+        }
+    }
+
+    async fn list_models(&self) -> Vec<ModelEntry> {
+        let Some(client) = &self.ai else {
+            tracing::debug!("list_models: no Gemini client configured");
+            return vec![];
+        };
+        match client.list_models().await {
+            Ok(models) => models
+                .into_iter()
+                .map(|m| ModelEntry { id: m.id, display_name: m.display_name })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("list_models error: {e}");
+                vec![]
             }
         }
     }
