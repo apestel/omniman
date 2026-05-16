@@ -21,6 +21,9 @@ build() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
+    # Clear user RUSTFLAGS to prevent personal linker overrides (e.g. lld)
+    # from breaking static archive linking in offline builds.
+    export RUSTFLAGS=""
     cargo build --release --workspace --frozen --offline
 }
 
