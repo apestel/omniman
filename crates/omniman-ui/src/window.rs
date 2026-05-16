@@ -544,6 +544,7 @@ pub fn build(
     glib::spawn_future_local({
         let window_weak = window.downgrade();
         let search_entry_weak = search_entry.downgrade();
+        let clip_req_tx = clip_req_tx.clone();
         async move {
             while show_rx.recv().await.is_ok() {
                 if let Some(win) = window_weak.upgrade() {
@@ -558,6 +559,10 @@ pub fn build(
                     if let Some(e) = search_entry_weak.upgrade() {
                         e.grab_focus();
                     }
+                    // Always refresh clipboard on show: the window may have been
+                    // hidden by click-outside while the clipboard tab was active,
+                    // so the tab-toggle refresh never fires on re-open.
+                    let _ = clip_req_tx.try_send(());
                 }
             }
         }

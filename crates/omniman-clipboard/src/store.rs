@@ -29,7 +29,8 @@ impl ClipboardStore {
     }
 
     /// Insert a new entry, skipping if identical to the most recent one.
-    pub fn insert(&self, kind: &str, content: &str, mime: &str) -> Result<()> {
+    /// Returns `true` if a new row was stored, `false` if it was a duplicate.
+    pub fn insert(&self, kind: &str, content: &str, mime: &str) -> Result<bool> {
         let recent: Option<String> = self
             .conn
             .query_row(
@@ -39,7 +40,7 @@ impl ClipboardStore {
             )
             .ok();
         if recent.as_deref() == Some(content) {
-            return Ok(());
+            return Ok(false);
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -48,7 +49,7 @@ impl ClipboardStore {
             "INSERT INTO clip_entries (kind, content, mime, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![kind, content, mime, now],
         )?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn history(&self, limit: usize) -> Result<Vec<ClipEntry>> {

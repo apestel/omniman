@@ -81,6 +81,9 @@ impl OmnimanService {
 
     #[zbus(signal)]
     pub async fn show_ui(emitter: &zbus::object_server::SignalEmitter<'_>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn clipboard_changed(emitter: &zbus::object_server::SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
 #[cfg(test)]

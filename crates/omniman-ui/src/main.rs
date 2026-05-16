@@ -146,6 +146,7 @@ async fn connect_and_serve(
     };
 
     let mut show_stream = proxy.receive_show_ui().await.context("subscribing ShowUi")?;
+    let mut clip_changed_stream = proxy.receive_clipboard_changed().await.context("subscribing ClipboardChanged")?;
 
     loop {
         tokio::select! {
@@ -157,6 +158,10 @@ async fn connect_and_serve(
                 if result_tx.send(hits).await.is_err() { break; }
             }
             Ok(()) = clip_req_rx.recv() => {
+                let entries = proxy.clipboard_history(50).await.unwrap_or_default();
+                if clip_result_tx.send(entries).await.is_err() { break; }
+            }
+            Some(_) = clip_changed_stream.next() => {
                 let entries = proxy.clipboard_history(50).await.unwrap_or_default();
                 if clip_result_tx.send(entries).await.is_err() { break; }
             }

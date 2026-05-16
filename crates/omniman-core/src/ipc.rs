@@ -26,4 +26,7 @@ pub trait Omniman {
 
     #[zbus(signal)]
     fn show_ui(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn clipboard_changed(&self) -> zbus::Result<()>;
 }
