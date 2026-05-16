@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/omniman-core",
+    "crates/omniman-index",
+    "crates/omniman-clipboard",
+    "crates/omniman-ai",
+    "crates/omniman-portal",
+    "crates/omniman-daemon",
+    "crates/omniman-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Adrien <pestouille@gmail.com>"]
+license = "MIT"
+
+[workspace.dependencies]
+# async
+tokio = { version = "1", features = ["full"] }
+# D-Bus
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# config / XDG paths
+directories = "5"
+# error handling
+thiserror = "2"
+anyhow = "1"
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# search
+tantivy = "0.22"
+# file watching
+notify = "7"
+# GUI
+gtk4 = { version = "0.9", features = ["v4_12"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+# async channel (GTK↔tokio bridge)
+async-channel = "2"
+# clipboard
+wl-clipboard-rs = "0.9"
+# HTTP (Gemini)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled"] }
+# XDG portals
+ashpd = { version = "0.10", features = ["tokio"] }

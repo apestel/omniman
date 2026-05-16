@@ -1,0 +1,16 @@
+[package]
+name = "omniman-portal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+omniman-core = { path = "../omniman-core" }
+ashpd = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-channel = { workspace = true }
+futures-util = "0.3"

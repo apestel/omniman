@@ -1,0 +1,54 @@
+app-id: org.adrien.Omniman
+runtime: org.gnome.Platform
+runtime-version: "47"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: omniman
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+finish-args:
+  # Wayland display
+  - --socket=wayland
+  # D-Bus session bus (daemon IPC + portals)
+  - --socket=session-bus
+  # Home directory access for file indexing
+  - --filesystem=home
+  # Secret Service (clipboard encryption, Gemini key)
+  - --talk-name=org.freedesktop.secrets
+  # XDG portals (GlobalShortcuts, RemoteDesktop)
+  - --talk-name=org.freedesktop.portal.Desktop
+  # System D-Bus for systemd user unit management
+  - --system-talk-name=org.freedesktop.login1
+
+modules:
+  - name: omniman
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/omniman/cargo
+        RUST_BACKTRACE: "1"
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml
+      - cargo --offline build --release --workspace
+      - install -Dm755 target/release/omnimand /app/bin/omnimand
+      - install -Dm755 target/release/omniman /app/bin/omniman
+      - install -Dm644 data/omniman.desktop /app/share/applications/org.adrien.Omniman.desktop
+      - install -Dm644 data/systemd/omnimand.service /app/lib/systemd/user/omnimand.service
+      - desktop-file-edit --set-key=Icon --set-value=org.adrien.Omniman
+          /app/share/applications/org.adrien.Omniman.desktop
+    sources:
+      - type: dir
+        path: ../..
+      - type: shell
+        commands:
+          - cargo vendor --locked --versioned-dirs vendor
+          - mkdir -p .cargo
+          - |
+            cat >> .cargo/config.toml << 'EOF'
+            [source.crates-io]
+            replace-with = "vendored-sources"
+
+            [source.vendored-sources]
+            directory = "vendor"
+            EOF

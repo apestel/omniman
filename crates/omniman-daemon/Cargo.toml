@@ -1,0 +1,25 @@
+[package]
+name = "omniman-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "omnimand"
+path = "src/main.rs"
+
+[dependencies]
+omniman-core = { path = "../omniman-core" }
+omniman-index = { path = "../omniman-index" }
+omniman-clipboard = { path = "../omniman-clipboard" }
+omniman-ai = { path = "../omniman-ai" }
+zbus = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

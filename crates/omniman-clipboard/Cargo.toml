@@ -1,0 +1,16 @@
+[package]
+name = "omniman-clipboard"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+omniman-core = { path = "../omniman-core" }
+wl-clipboard-rs = { workspace = true }
+rusqlite = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }

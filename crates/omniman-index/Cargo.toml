@@ -1,0 +1,21 @@
+[package]
+name = "omniman-index"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+omniman-core = { path = "../omniman-core" }
+tantivy = { workspace = true }
+notify = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+mime_guess = "2"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

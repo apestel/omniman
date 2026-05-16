@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Omniman
+Comment=Spotlight-like launcher with AI and clipboard history
+Exec=omniman --toggle
+Icon=system-search
+Type=Application
+Categories=Utility;
+Keywords=search;launcher;clipboard;ai;
+NoDisplay=true
+StartupNotify=false

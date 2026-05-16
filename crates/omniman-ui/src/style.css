@@ -1,0 +1,140 @@
+/* Omniman — Spotlight-like launcher */
+
+.omniman-launcher {
+    background: rgba(24, 24, 26, 0.94);
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75);
+    color: #f2f2f7;
+}
+
+.omniman-root {
+    background: transparent;
+}
+
+/* Search entry */
+.omniman-search {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    font-size: 18px;
+    color: #f2f2f7;
+    caret-color: #636dff;
+}
+
+.omniman-search text {
+    background: transparent;
+}
+
+.omniman-search:focus {
+    box-shadow: none;
+    outline: none;
+}
+
+/* Results list */
+.omniman-list {
+    background: transparent;
+}
+
+.omniman-list row {
+    background: transparent;
+    border-radius: 8px;
+    margin: 2px 8px;
+    padding: 2px 0;
+    color: #f2f2f7;
+}
+
+.omniman-list row:hover {
+    background: rgba(255, 255, 255, 0.07);
+}
+
+.omniman-list row:selected {
+    background: rgba(100, 110, 255, 0.35);
+}
+
+.omniman-list row subtitle {
+    color: rgba(235, 235, 245, 0.45);
+    font-size: 11px;
+}
+
+/* Placeholder */
+.omniman-placeholder {
+    color: rgba(235, 235, 245, 0.3);
+    font-size: 14px;
+}
+
+/* Separator */
+separator {
+    background: rgba(255, 255, 255, 0.08);
+    min-height: 1px;
+}
+
+/* Scrollbar */
+scrollbar {
+    background: transparent;
+}
+
+scrollbar slider {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    min-width: 4px;
+}
+
+scrollbar slider:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+/* Tab bar */
+.omniman-tabbar {
+    background: transparent;
+    padding: 4px 12px;
+}
+
+.omniman-tab {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: 6px;
+    color: rgba(235, 235, 245, 0.55);
+    font-size: 13px;
+    padding: 4px 14px;
+    min-height: 0;
+}
+
+.omniman-tab:checked {
+    background: rgba(100, 110, 255, 0.25);
+    color: #f2f2f7;
+}
+
+.omniman-tab:hover:not(:checked) {
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(235, 235, 245, 0.8);
+}
+
+/* Gear / preferences button */
+.omniman-gear-btn {
+    border-radius: 6px;
+    color: rgba(235, 235, 245, 0.45);
+    min-width: 0;
+    padding: 4px 6px;
+}
+
+.omniman-gear-btn:hover {
+    color: #f2f2f7;
+    background: rgba(255, 255, 255, 0.07);
+}
+
+/* Ask AI button */
+.omniman-ask-btn {
+    border-radius: 8px;
+    font-size: 13px;
+    padding: 4px 14px;
+    min-height: 0;
+}
+
+/* AI response text view */
+.omniman-ai-text {
+    background: transparent;
+    color: #f2f2f7;
+    font-size: 14px;
+}

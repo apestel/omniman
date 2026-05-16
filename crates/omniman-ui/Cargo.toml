@@ -1,0 +1,23 @@
+[package]
+name = "omniman-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "omniman"
+path = "src/main.rs"
+
+[dependencies]
+omniman-core = { path = "../omniman-core" }
+omniman-ai = { path = "../omniman-ai" }
+gtk4 = { workspace = true }
+libadwaita = { workspace = true }
+async-channel = { workspace = true }
+zbus = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+futures-util = "0.3"
