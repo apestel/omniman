@@ -3,7 +3,13 @@
   "packages": {
     ".": {
       "release-type": "rust",
-      "component": "omniman"
+      "component": "omniman",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "PKGBUILD"
+        }
+      ]
     }
   }
 }

@@ -1,6 +1,6 @@
 # Maintainer: Adrien <pestouille@gmail.com>
 pkgname=omniman
-pkgver=0.1.0
+pkgver=0.1.0 # x-release-please-version
 pkgrel=1
 pkgdesc="Spotlight-like launcher with AI and clipboard history for Wayland/GNOME"
 arch=('x86_64')
