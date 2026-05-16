@@ -6,14 +6,22 @@ pkgdesc="Spotlight-like launcher with AI and clipboard history for Wayland/GNOME
 arch=('x86_64')
 url="https://github.com/apestel/omniman"
 license=('MIT')
-depends=('gtk4' 'libadwaita' 'wl-clipboard' 'dbus' 'xdg-utils' 'glib2')
-makedepends=('rust' 'cargo' 'zstd')
+depends=('gtk4' 'libadwaita' 'wl-clipboard' 'dbus' 'xdg-utils' 'glib2' 'sqlite')
+makedepends=('rust' 'cargo')
 install=omniman.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/apestel/$pkgname/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
     cd "$pkgname-$pkgver"
+    # Override user's ~/.cargo/config.toml to prevent lld and pkg-config zstd
+    # from bleeding into this offline build.
+    mkdir -p .cargo
+    cat > .cargo/config.toml << 'EOF'
+[target.x86_64-unknown-linux-gnu]
+linker = "gcc"
+rustflags = []
+EOF
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
@@ -21,9 +29,16 @@ build() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    # Clear user RUSTFLAGS to prevent personal linker overrides (e.g. lld)
-    # from breaking static archive linking in offline builds.
     export RUSTFLAGS=""
+    # Force bundled static zstd; system libzstd.so causes DSO link errors
+    # with --as-needed when the dynamic lib isn't listed explicitly.
+    export ZSTD_SYS_USE_PKG_CONFIG=0
+    # Strip -flto from makepkg's CFLAGS: libsqlite3-sys's bundled sqlite3.c
+    # build emits LTO objects, which causes rustc to drop the -l static=sqlite3
+    # directive at final link → undefined sqlite3_* references.
+    export CFLAGS="${CFLAGS//-flto=auto/}"
+    export CXXFLAGS="${CXXFLAGS//-flto=auto/}"
+    export LDFLAGS="${LDFLAGS//-flto=auto/}"
     cargo build --release --workspace --frozen --offline
 }
 
