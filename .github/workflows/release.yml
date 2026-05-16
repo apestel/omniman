@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libdbus-1-dev \
+            libsqlite3-dev \
+            libsecret-1-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --workspace --locked
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="omniman-${VERSION}-x86_64-linux.tar.gz"
+          mkdir -p dist/omniman-${VERSION}
+          cp target/release/omniman target/release/omnimand dist/omniman-${VERSION}/
+          cp -r data dist/omniman-${VERSION}/
+          tar -czf "$ARCHIVE" -C dist "omniman-${VERSION}"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARCHIVE }}
