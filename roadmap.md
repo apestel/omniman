@@ -28,7 +28,7 @@ Why custom: existing tools (Onagre, Anyrun, Walker, Rofi 2.0) are launcher-only 
 |---|---|
 | Architecture | Daemon (systemd user service) + client GUI à la demande |
 | GUI | GTK4 + libadwaita (gtk4-rs) |
-| Hotkey global | XDG Portal `org.freedesktop.portal.GlobalShortcuts` (D-Bus, ashpd crate) |
+| Hotkey global | GNOME gsettings custom keybinding → `gdbus call RequestShowUi` → daemon emits `ShowUi` signal |
 | Indexation | Tantivy custom, scope `$HOME` avec exclusions standards (.cache, node_modules, .git, target, .venv…) |
 | AI | Gemini via `gemini-rs` ou `google-generative-ai-rs`. Trigger heuristique (?, mots interrogatifs, longueur) |
 | Clipboard | wl-clipboard-rs / `wl-clipboard` watcher. Texte + images + URI fichiers, persistance disque chiffrée |
@@ -45,7 +45,6 @@ omniman/
 │   ├── omniman-index/            # Tantivy + watcher inotify (notify crate)
 │   ├── omniman-clipboard/        # daemon clipboard, store sqlite chiffré
 │   ├── omniman-ai/               # client Gemini, heuristique question
-│   ├── omniman-portal/           # GlobalShortcuts portal (ashpd)
 │   ├── omniman-daemon/           # binaire `omnimand` (systemd user service)
 │   └── omniman-ui/               # binaire `omniman` (GTK4 client)
 ├── data/
@@ -61,7 +60,6 @@ Long-running process. Démarré au login via systemd user service.
 Responsabilités :
 - **Indexation** : crawl initial `$HOME` (respecte exclusions), maintien incrémental via `notify` (inotify). Index Tantivy stocké dans `$XDG_DATA_HOME/omniman/index/`. Schéma : path, filename, parent, mtime, size, mime, content_excerpt (option future).
 - **Clipboard watcher** : utilise `wl-paste --watch` ou `wl-clipboard-rs` (protocole `zwlr_data_control_manager_v1`, supporté par Mutter ≥ 45). Stocke historique dans SQLite (`rusqlite`) chiffré (clé via libsecret/Secret Service).
-- **Hotkey portal** : enregistre raccourci via `ashpd::desktop::global_shortcuts`. Sur trigger, signale au client de s'afficher (D-Bus method call).
 - **Bus D-Bus** : expose `org.adrien.Omniman` (zbus) avec méthodes `Search(query)`, `ClipboardHistory(limit)`, `AskAI(prompt)`, signal `ShowUi`.
 
 ### Client UI (`omniman`)
@@ -83,7 +81,6 @@ Comportement :
 |---|---|
 | GUI | `gtk4`, `libadwaita`, `gtk4-rs` (workspace gtk-rs) |
 | D-Bus | `zbus` (async, pure-Rust) |
-| Portal | `ashpd` (XDG portals) |
 | Index | `tantivy` |
 | File watcher | `notify` |
 | Clipboard | `wl-clipboard-rs` |
@@ -115,10 +112,10 @@ Comportement :
 - Sélection ouvre fichier via `xdg-open`.
 - CSS sombre style Spotlight.
 
-### Phase 4 — Hotkey portal
-- `ashpd::global_shortcuts` : binding par défaut `Ctrl+Space` (modifiable).
-- Au trigger : émet signal `ShowUi` sur D-Bus.
-- Client réagit : présente fenêtre, focus champ.
+### Phase 4 — Hotkey (gsettings)
+- `data/setup-shortcut.sh` enregistre keybinding GNOME (défaut `Ctrl+Space`).
+- Shortcut exécute `gdbus call RequestShowUi` sur le daemon.
+- Daemon émet signal `ShowUi` ; client présente fenêtre, focus champ.
 
 ### Phase 5 — Clipboard
 - Watcher `wl-clipboard-rs` (protocole `zwlr_data_control_manager_v1`).
@@ -146,7 +143,6 @@ Comportement :
 - `/home/adrien/projects/omniman/crates/omniman-index/src/lib.rs` (Tantivy)
 - `/home/adrien/projects/omniman/crates/omniman-clipboard/src/lib.rs`
 - `/home/adrien/projects/omniman/crates/omniman-ai/src/lib.rs`
-- `/home/adrien/projects/omniman/crates/omniman-portal/src/lib.rs`
 - `/home/adrien/projects/omniman/crates/omniman-daemon/src/main.rs`
 - `/home/adrien/projects/omniman/crates/omniman-ui/src/main.rs`
 - `/home/adrien/projects/omniman/data/systemd/omnimand.service`

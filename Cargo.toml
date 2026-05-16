@@ -5,7 +5,6 @@ members = [
     "crates/omniman-index",
     "crates/omniman-clipboard",
     "crates/omniman-ai",
-    "crates/omniman-portal",
     "crates/omniman-daemon",
     "crates/omniman-ui",
 ]
@@ -47,8 +46,6 @@ wl-clipboard-rs = "0.9"
 # HTTP (Gemini)
 reqwest = { version = "0.12", features = ["json", "stream"] }
 # SQLite
-rusqlite = { version = "0.32", features = ["bundled"] }
-# XDG portals
-ashpd = { version = "0.10", features = ["tokio"] }
+rusqlite = { version = "0.32" }
 # Markdown parsing
 pulldown-cmark = "0.12"
