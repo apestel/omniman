@@ -88,11 +88,12 @@ fn build_ai_page(win: &libadwaita::PreferencesWindow, config: Rc<RefCell<Config>
         .build();
     win.add(&page);
 
-    let group = libadwaita::PreferencesGroup::builder()
-        .title("Gemini")
-        .description("Set GEMINI_API_KEY in omnimand's environment. Restart omnimand to apply model changes.")
+    // ── Gemini ────────────────────────────────────────────────────────────────
+    let gemini_group = libadwaita::PreferencesGroup::builder()
+        .title("Gemini (default)")
+        .description("Set GEMINI_API_KEY in omnimand's environment. Restart omnimand to apply.")
         .build();
-    page.add(&group);
+    page.add(&gemini_group);
 
     let models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"];
     let model_list = gtk4::StringList::new(&models);
@@ -102,21 +103,78 @@ fn build_ai_page(win: &libadwaita::PreferencesWindow, config: Rc<RefCell<Config>
         models.iter().position(|s| *s == m.as_str()).unwrap_or(0) as u32
     };
 
-    let row = libadwaita::ComboRow::builder()
+    let model_row = libadwaita::ComboRow::builder()
         .title("Model")
         .model(&model_list)
         .selected(current_idx)
         .build();
-    group.add(&row);
+    gemini_group.add(&model_row);
 
-    row.connect_selected_notify(move |r| {
-        let model = r
-            .selected_item()
-            .and_downcast::<gtk4::StringObject>()
-            .map(|s| s.string().to_string())
-            .unwrap_or_else(|| models[0].to_string());
-        config.borrow_mut().ai.model = model;
-        let _ = config.borrow().save();
+    model_row.connect_selected_notify({
+        let config = Rc::clone(&config);
+        move |r| {
+            let model = r
+                .selected_item()
+                .and_downcast::<gtk4::StringObject>()
+                .map(|s| s.string().to_string())
+                .unwrap_or_else(|| models[0].to_string());
+            config.borrow_mut().ai.model = model;
+            let _ = config.borrow().save();
+        }
+    });
+
+    // ── OpenAI-compatible endpoint ────────────────────────────────────────────
+    let oai_group = libadwaita::PreferencesGroup::builder()
+        .title("OpenAI-compatible endpoint")
+        .description("When set, overrides Gemini. Restart Omniman to apply.")
+        .build();
+    page.add(&oai_group);
+
+    let endpoint_row = libadwaita::EntryRow::builder()
+        .title("Base URL")
+        .text(config.borrow().ai.openai_endpoint.as_deref().unwrap_or(""))
+        .build();
+    oai_group.add(&endpoint_row);
+
+    let key_row = libadwaita::PasswordEntryRow::builder()
+        .title("API key")
+        .text(config.borrow().ai.openai_key.as_deref().unwrap_or(""))
+        .build();
+    oai_group.add(&key_row);
+
+    let oai_model_row = libadwaita::EntryRow::builder()
+        .title("Model")
+        .text(config.borrow().ai.openai_model.as_str())
+        .build();
+    oai_group.add(&oai_model_row);
+
+    endpoint_row.connect_changed({
+        let config = Rc::clone(&config);
+        move |r| {
+            let v = r.text().to_string();
+            config.borrow_mut().ai.openai_endpoint = if v.is_empty() { None } else { Some(v) };
+            let _ = config.borrow().save();
+        }
+    });
+
+    key_row.connect_changed({
+        let config = Rc::clone(&config);
+        move |r| {
+            let v = r.text().to_string();
+            config.borrow_mut().ai.openai_key = if v.is_empty() { None } else { Some(v) };
+            let _ = config.borrow().save();
+        }
+    });
+
+    oai_model_row.connect_changed({
+        let config = Rc::clone(&config);
+        move |r| {
+            let v = r.text().to_string();
+            if !v.is_empty() {
+                config.borrow_mut().ai.openai_model = v;
+                let _ = config.borrow().save();
+            }
+        }
     });
 }
 

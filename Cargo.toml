@@ -50,3 +50,5 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # XDG portals
 ashpd = { version = "0.10", features = ["tokio"] }
+# Markdown parsing
+pulldown-cmark = "0.12"

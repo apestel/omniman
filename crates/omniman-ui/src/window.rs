@@ -4,6 +4,8 @@ use gtk4::{gdk, glib, prelude::*};
 use libadwaita::prelude::*;
 use omniman_core::types::{ClipEntry, Hit};
 
+use crate::AiMsg;
+
 pub fn build(
     app: &libadwaita::Application,
     query_tx: async_channel::Sender<String>,
@@ -12,7 +14,7 @@ pub fn build(
     clip_req_tx: async_channel::Sender<()>,
     clip_result_rx: async_channel::Receiver<Vec<ClipEntry>>,
     ai_req_tx: async_channel::Sender<String>,
-    ai_result_rx: async_channel::Receiver<String>,
+    ai_result_rx: async_channel::Receiver<AiMsg>,
 ) -> libadwaita::ApplicationWindow {
     load_css();
 
@@ -49,7 +51,6 @@ pub fn build(
         .margin_bottom(10)
         .margin_end(12)
         .css_classes(["omniman-ask-btn", "suggested-action"])
-        .visible(false)
         .build();
 
     search_row.append(&search_entry);
@@ -205,13 +206,14 @@ pub fn build(
         let btn_ai = btn_ai.clone();
         let ai_stack = ai_stack.clone();
         let spinner = spinner.clone();
+        let ai_buffer = ai_buffer.clone();
         move |_| {
             let query = search_entry.text().to_string();
             if query.trim().is_empty() {
                 return;
             }
             btn_ai.set_active(true);
-            start_ai_request(&ai_req_tx, &ai_stack, &spinner, query);
+            start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
         }
     });
 
@@ -242,12 +244,13 @@ pub fn build(
         let ai_req_tx = ai_req_tx.clone();
         let ai_stack = ai_stack.clone();
         let spinner = spinner.clone();
+        let ai_buffer = ai_buffer.clone();
         move |btn| {
             if btn.is_active() {
                 stack.set_visible_child_name("ai");
                 let query = search_entry.text().to_string();
                 if !query.trim().is_empty() {
-                    start_ai_request(&ai_req_tx, &ai_stack, &spinner, query);
+                    start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
                 }
             }
         }
@@ -260,14 +263,11 @@ pub fn build(
         let debounce = Rc::clone(&debounce);
         let query_tx = query_tx.clone();
         let btn_files = btn_files.clone();
-        let ask_btn = ask_btn.clone();
         move |entry| {
             if let Some(id) = debounce.take() {
                 id.remove();
             }
             let text = entry.text().to_string();
-
-            ask_btn.set_visible(omniman_ai::is_question(&text));
 
             if text.trim().is_empty() {
                 return;
@@ -301,6 +301,7 @@ pub fn build(
         let ai_req_tx = ai_req_tx.clone();
         let ai_stack = ai_stack.clone();
         let spinner = spinner.clone();
+        let ai_buffer = ai_buffer.clone();
         let window_weak = window.downgrade();
         key_ctrl.connect_key_pressed(move |_, key, _, mods| {
             match key {
@@ -336,7 +337,7 @@ pub fn build(
                     let query = search_entry.text().to_string();
                     if !query.trim().is_empty() {
                         btn_ai.set_active(true);
-                        start_ai_request(&ai_req_tx, &ai_stack, &spinner, query);
+                        start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
                     }
                     glib::Propagation::Stop
                 }
@@ -470,10 +471,30 @@ pub fn build(
         let ai_stack = ai_stack.clone();
         let spinner = spinner.clone();
         async move {
-            while let Ok(response) = ai_result_rx.recv().await {
-                spinner.stop();
-                ai_stack.set_visible_child_name("response");
-                render_markdown(&ai_buffer, &response);
+            let mut accumulated = String::new();
+            while let Ok(msg) = ai_result_rx.recv().await {
+                match msg {
+                    AiMsg::Start => {
+                        accumulated.clear();
+                        ai_buffer.set_text("");
+                        spinner.start();
+                        ai_stack.set_visible_child_name("loading");
+                    }
+                    AiMsg::Chunk(chunk) => {
+                        if accumulated.is_empty() {
+                            spinner.stop();
+                            ai_stack.set_visible_child_name("response");
+                        }
+                        accumulated.push_str(&chunk);
+                        let mut end = ai_buffer.end_iter();
+                        ai_buffer.insert(&mut end, &chunk);
+                    }
+                    AiMsg::Done => {
+                        spinner.stop();
+                        ai_stack.set_visible_child_name("response");
+                        render_markdown(&ai_buffer, &accumulated);
+                    }
+                }
             }
         }
     });
@@ -513,101 +534,138 @@ fn start_ai_request(
     ai_req_tx: &async_channel::Sender<String>,
     ai_stack: &gtk4::Stack,
     spinner: &gtk4::Spinner,
+    ai_buffer: &gtk4::TextBuffer,
     query: String,
 ) {
+    ai_buffer.set_text("");
     ai_stack.set_visible_child_name("loading");
     spinner.start();
     let _ = ai_req_tx.try_send(query);
 }
 
-/// Populate `buffer` with a basic markdown rendering using TextTags.
+/// Populate `buffer` with markdown rendered to styled text via pulldown-cmark.
 fn render_markdown(buffer: &gtk4::TextBuffer, text: &str) {
+    use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
     buffer.set_text("");
     let mut iter = buffer.end_iter();
 
-    for line in text.lines() {
-        if let Some(heading) = line.strip_prefix("### ") {
-            buffer.insert_with_tags_by_name(&mut iter, heading, &["h3"]);
-            buffer.insert(&mut iter, "\n");
-        } else if let Some(heading) = line.strip_prefix("## ") {
-            buffer.insert_with_tags_by_name(&mut iter, heading, &["h2"]);
-            buffer.insert(&mut iter, "\n");
-        } else if let Some(heading) = line.strip_prefix("# ") {
-            buffer.insert_with_tags_by_name(&mut iter, heading, &["h1"]);
-            buffer.insert(&mut iter, "\n");
-        } else if line.starts_with("```") || line.starts_with("    ") {
-            // Code block line → monospace
-            let content = line.strip_prefix("```").unwrap_or(line);
-            if !content.is_empty() {
-                buffer.insert_with_tags_by_name(&mut iter, content, &["code"]);
-                buffer.insert(&mut iter, "\n");
-            } else {
+    // Active inline tag names (bold, italic, code_block). Applied to each text insertion.
+    let mut tag_stack: Vec<&'static str> = Vec::new();
+    // Stack of list kinds: None = unordered, Some(n) = ordered starting at n.
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
+    // Per-list item counter (incremented on each Item start).
+    let mut item_counters: Vec<u64> = Vec::new();
+    let mut in_list_item = false;
+    let mut in_code_block = false;
+
+    let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
+    let parser = Parser::new_ext(text, opts);
+
+    for event in parser {
+        match event {
+            // ── Block opens ──────────────────────────────────────────────────
+            Event::Start(Tag::Heading { level, .. }) => {
+                let name: &'static str = match level {
+                    HeadingLevel::H1 => "h1",
+                    HeadingLevel::H2 => "h2",
+                    _ => "h3",
+                };
+                tag_stack.push(name);
+            }
+            Event::Start(Tag::Strong) => tag_stack.push("bold"),
+            Event::Start(Tag::Emphasis) => tag_stack.push("italic"),
+            Event::Start(Tag::CodeBlock(_)) => {
+                in_code_block = true;
+                tag_stack.push("code_block");
+            }
+            Event::Start(Tag::List(start)) => {
+                list_stack.push(start);
+                item_counters.push(start.unwrap_or(1));
+            }
+            Event::Start(Tag::Item) => {
+                in_list_item = true;
+                let prefix = match list_stack.last() {
+                    Some(None) => "  • ".to_owned(),
+                    Some(Some(_)) => {
+                        let n = item_counters.last_mut().map(|c| {
+                            let v = *c;
+                            *c += 1;
+                            v
+                        }).unwrap_or(1);
+                        format!("  {}. ", n)
+                    }
+                    None => "  • ".to_owned(),
+                };
+                buffer.insert_with_tags_by_name(&mut iter, &prefix, &["bullet"]);
+            }
+            Event::Start(Tag::BlockQuote(_)) => {
+                tag_stack.push("blockquote");
+                buffer.insert_with_tags_by_name(&mut iter, "▎ ", &["blockquote"]);
+            }
+            Event::Start(Tag::Paragraph) => {}
+            Event::Start(_) => {}
+
+            // ── Block closes ─────────────────────────────────────────────────
+            Event::End(TagEnd::Heading(_)) => {
+                tag_stack.pop();
+                buffer.insert(&mut iter, "\n\n");
+            }
+            Event::End(TagEnd::Strong) | Event::End(TagEnd::Emphasis) => {
+                tag_stack.pop();
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                in_code_block = false;
+                tag_stack.pop();
                 buffer.insert(&mut iter, "\n");
             }
-        } else {
-            // Inline parsing for **bold**, *italic*, `code`
-            insert_inline(buffer, &mut iter, line);
-            buffer.insert(&mut iter, "\n");
+            Event::End(TagEnd::List(_)) => {
+                list_stack.pop();
+                item_counters.pop();
+                buffer.insert(&mut iter, "\n");
+            }
+            Event::End(TagEnd::Item) => {
+                in_list_item = false;
+                buffer.insert(&mut iter, "\n");
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                tag_stack.pop();
+            }
+            Event::End(TagEnd::Paragraph) => {
+                if !in_list_item {
+                    buffer.insert(&mut iter, "\n\n");
+                }
+            }
+            Event::End(_) => {}
+
+            // ── Inline content ───────────────────────────────────────────────
+            Event::Text(t) => {
+                let tags: Vec<&str> = tag_stack.clone();
+                if tags.is_empty() {
+                    buffer.insert(&mut iter, &t);
+                } else {
+                    buffer.insert_with_tags_by_name(&mut iter, &t, &tags);
+                }
+            }
+            Event::Code(t) => {
+                buffer.insert_with_tags_by_name(&mut iter, &t, &["code"]);
+            }
+            Event::SoftBreak => {
+                if in_code_block {
+                    buffer.insert(&mut iter, "\n");
+                } else {
+                    buffer.insert(&mut iter, " ");
+                }
+            }
+            Event::HardBreak => {
+                buffer.insert(&mut iter, "\n");
+            }
+            Event::Rule => {
+                buffer.insert(&mut iter, "\n");
+            }
+            _ => {}
         }
     }
-}
-
-fn insert_inline(buffer: &gtk4::TextBuffer, iter: &mut gtk4::TextIter, line: &str) {
-    let mut chars = line.chars().peekable();
-    let mut plain = String::new();
-
-    macro_rules! flush_plain {
-        () => {
-            if !plain.is_empty() {
-                buffer.insert(iter, &plain);
-                plain.clear();
-            }
-        };
-    }
-
-    while let Some(ch) = chars.next() {
-        if ch == '`' {
-            flush_plain!();
-            let mut code = String::new();
-            for c in chars.by_ref() {
-                if c == '`' {
-                    break;
-                }
-                code.push(c);
-            }
-            buffer.insert_with_tags_by_name(iter, &code, &["code"]);
-        } else if ch == '*' {
-            if chars.peek() == Some(&'*') {
-                chars.next();
-                flush_plain!();
-                let mut bold = String::new();
-                loop {
-                    match chars.next() {
-                        Some('*') if chars.peek() == Some(&'*') => {
-                            chars.next();
-                            break;
-                        }
-                        Some(c) => bold.push(c),
-                        None => break,
-                    }
-                }
-                buffer.insert_with_tags_by_name(iter, &bold, &["bold"]);
-            } else {
-                flush_plain!();
-                let mut italic = String::new();
-                for c in chars.by_ref() {
-                    if c == '*' {
-                        break;
-                    }
-                    italic.push(c);
-                }
-                buffer.insert_with_tags_by_name(iter, &italic, &["italic"]);
-            }
-        } else {
-            plain.push(ch);
-        }
-    }
-    flush_plain!();
 }
 
 fn setup_text_tags(buffer: &gtk4::TextBuffer) {
@@ -645,6 +703,23 @@ fn setup_text_tags(buffer: &gtk4::TextBuffer) {
         .foreground("#a8d8a8")
         .background("rgba(0,0,0,0.3)")
         .build();
+    let code_block = gtk4::TextTag::builder()
+        .name("code_block")
+        .family("monospace")
+        .foreground("#a8d8a8")
+        .background("rgba(0,0,0,0.4)")
+        .left_margin(24)
+        .build();
+    let bullet = gtk4::TextTag::builder()
+        .name("bullet")
+        .foreground("#8e8ea0")
+        .build();
+    let blockquote = gtk4::TextTag::builder()
+        .name("blockquote")
+        .foreground("#8e8ea0")
+        .style(gtk4::pango::Style::Italic)
+        .left_margin(16)
+        .build();
 
     table.add(&h1);
     table.add(&h2);
@@ -652,6 +727,9 @@ fn setup_text_tags(buffer: &gtk4::TextBuffer) {
     table.add(&bold);
     table.add(&italic);
     table.add(&code);
+    table.add(&code_block);
+    table.add(&bullet);
+    table.add(&blockquote);
 }
 
 fn load_css() {

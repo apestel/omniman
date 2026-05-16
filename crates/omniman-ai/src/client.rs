@@ -41,6 +41,68 @@ impl GeminiClient {
         Ok(Self::new(key, model.to_owned()))
     }
 
+    /// Send a prompt and stream each text chunk to `tx` as it arrives.
+    pub async fn ask_streaming(
+        &self,
+        prompt: &str,
+        tx: &async_channel::Sender<String>,
+    ) -> Result<()> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
+            self.model, self.api_key
+        );
+        let body = serde_json::json!({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 32768}
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("sending Gemini request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Gemini API {status}: {text}");
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut line_buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("reading SSE stream")?;
+            line_buf.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(nl) = line_buf.find('\n') {
+                let line = line_buf[..nl].trim_end_matches('\r').to_owned();
+                line_buf.drain(..=nl);
+
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if let Ok(resp) = serde_json::from_str::<StreamResponse>(data) {
+                        for candidate in resp.candidates.unwrap_or_default() {
+                            if let Some(content) = candidate.content {
+                                for part in content.parts.unwrap_or_default() {
+                                    if let Some(text) = part.text {
+                                        if tx.send(text).await.is_err() {
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    debug!(bytes = data.len(), "SSE chunk processed");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Send a prompt and collect the full response by consuming the SSE stream.
     pub async fn ask(&self, prompt: &str) -> Result<String> {
         let url = format!(
@@ -49,7 +111,7 @@ impl GeminiClient {
         );
         let body = serde_json::json!({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": 2048}
+            "generationConfig": {"maxOutputTokens": 32768}
         });
 
         let response = self

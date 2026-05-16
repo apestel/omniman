@@ -10,6 +10,12 @@ use omniman_core::{
     types::{ClipEntry, Hit},
 };
 
+pub enum AiMsg {
+    Start,
+    Chunk(String),
+    Done,
+}
+
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -24,7 +30,7 @@ fn main() -> glib::ExitCode {
     let (clip_req_tx, clip_req_rx) = async_channel::bounded::<()>(8);
     let (clip_result_tx, clip_result_rx) = async_channel::bounded::<Vec<ClipEntry>>(8);
     let (ai_req_tx, ai_req_rx) = async_channel::bounded::<String>(4);
-    let (ai_result_tx, ai_result_rx) = async_channel::bounded::<String>(4);
+    let (ai_result_tx, ai_result_rx) = async_channel::bounded::<AiMsg>(64);
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -75,7 +81,7 @@ async fn dbus_worker(
     clip_req_rx: async_channel::Receiver<()>,
     clip_result_tx: async_channel::Sender<Vec<ClipEntry>>,
     ai_req_rx: async_channel::Receiver<String>,
-    ai_result_tx: async_channel::Sender<String>,
+    ai_result_tx: async_channel::Sender<AiMsg>,
 ) {
     loop {
         match connect_and_serve(
@@ -105,7 +111,7 @@ async fn connect_and_serve(
     clip_req_rx: &async_channel::Receiver<()>,
     clip_result_tx: &async_channel::Sender<Vec<ClipEntry>>,
     ai_req_rx: &async_channel::Receiver<String>,
-    ai_result_tx: &async_channel::Sender<String>,
+    ai_result_tx: &async_channel::Sender<AiMsg>,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     use futures_util::StreamExt;
@@ -119,6 +125,25 @@ async fn connect_and_serve(
         .context("creating Omniman proxy")?;
 
     tracing::info!("connected to omnimand via D-Bus");
+
+    // Prefer OpenAI-compatible endpoint when configured; fall back to Gemini from env.
+    let config = omniman_core::config::Config::load().unwrap_or_default();
+    let openai_client: Option<Arc<omniman_ai::OpenAiClient>> =
+        match (&config.ai.openai_endpoint, &config.ai.openai_key) {
+            (Some(endpoint), Some(key)) if !endpoint.is_empty() && !key.is_empty() => Some(
+                Arc::new(omniman_ai::OpenAiClient::new(
+                    key.clone(),
+                    endpoint.clone(),
+                    config.ai.openai_model.clone(),
+                )),
+            ),
+            _ => None,
+        };
+    let gemini_client: Option<Arc<omniman_ai::GeminiClient>> = if openai_client.is_none() {
+        omniman_ai::GeminiClient::from_env(&config.ai.model).ok().map(Arc::new)
+    } else {
+        None
+    };
 
     let mut show_stream = proxy.receive_show_ui().await.context("subscribing ShowUi")?;
 
@@ -136,10 +161,57 @@ async fn connect_and_serve(
                 if clip_result_tx.send(entries).await.is_err() { break; }
             }
             Ok(prompt) = ai_req_rx.recv() => {
-                let response = proxy.ask_ai(&prompt).await.unwrap_or_else(|e| {
-                    format!("D-Bus error: {e}")
+                let result_tx = ai_result_tx.clone();
+                let oai = openai_client.clone();
+                let gem = gemini_client.clone();
+                let proxy_clone = proxy.clone();
+                tokio::spawn(async move {
+                    let _ = result_tx.send(AiMsg::Start).await;
+
+                    // Helper: stream from any client that implements ask_streaming
+                    // and forward chunks to the UI channel.
+                    async fn stream_and_forward<F, Fut>(
+                        ask: F,
+                        result_tx: &async_channel::Sender<AiMsg>,
+                    ) where
+                        F: FnOnce(async_channel::Sender<String>) -> Fut,
+                        Fut: std::future::Future<Output = anyhow::Result<()>>,
+                    {
+                        let (chunk_tx, chunk_rx) = async_channel::bounded::<String>(64);
+                        let fwd_tx = result_tx.clone();
+                        let forwarder = tokio::spawn(async move {
+                            while let Ok(chunk) = chunk_rx.recv().await {
+                                if fwd_tx.send(AiMsg::Chunk(chunk)).await.is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        if let Err(e) = ask(chunk_tx.clone()).await {
+                            let _ = result_tx.send(AiMsg::Chunk(format!("Error: {e}"))).await;
+                        }
+                        drop(chunk_tx);
+                        let _ = forwarder.await;
+                    }
+
+                    if let Some(client) = oai {
+                        stream_and_forward(
+                            |tx| async move { client.ask_streaming(&prompt, &tx).await },
+                            &result_tx,
+                        ).await;
+                    } else if let Some(client) = gem {
+                        stream_and_forward(
+                            |tx| async move { client.ask_streaming(&prompt, &tx).await },
+                            &result_tx,
+                        ).await;
+                    } else {
+                        let resp = proxy_clone
+                            .ask_ai(&prompt)
+                            .await
+                            .unwrap_or_else(|e| format!("D-Bus error: {e}"));
+                        let _ = result_tx.send(AiMsg::Chunk(resp)).await;
+                    }
+                    let _ = result_tx.send(AiMsg::Done).await;
                 });
-                if ai_result_tx.send(response).await.is_err() { break; }
             }
             else => break,
         }

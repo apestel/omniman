@@ -21,3 +21,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 futures-util = "0.3"
+pulldown-cmark = { workspace = true }

@@ -27,6 +27,14 @@ pub struct ClipboardConfig {
 #[serde(default)]
 pub struct AiConfig {
     pub model: String,
+    /// Base URL for an OpenAI-compatible endpoint (e.g. https://api.openai.com/v1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_endpoint: Option<String>,
+    /// API key for the OpenAI-compatible endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_key: Option<String>,
+    /// Model name to use with the OpenAI-compatible endpoint.
+    pub openai_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +80,9 @@ impl Default for AiConfig {
     fn default() -> Self {
         Self {
             model: "gemini-2.5-flash".into(),
+            openai_endpoint: None,
+            openai_key: None,
+            openai_model: "gpt-4o".into(),
         }
     }
 }
