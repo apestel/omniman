@@ -191,11 +191,17 @@ pub fn build(
     window.set_content(Some(&root));
 
     // ── Gear button → preferences window ─────────────────────────────────────
+    let prefs_open: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     gear_btn.connect_clicked({
         let window_weak = window.downgrade();
+        let prefs_open = prefs_open.clone();
         move |_| {
             let parent = window_weak.upgrade();
-            crate::prefs::build(parent.as_ref().map(|w| w.upcast_ref::<gtk4::Window>()));
+            prefs_open.set(true);
+            let prefs_win =
+                crate::prefs::build(parent.as_ref().map(|w| w.upcast_ref::<gtk4::Window>()));
+            let flag = prefs_open.clone();
+            prefs_win.connect_destroy(move |_| flag.set(false));
         }
     });
 
@@ -510,6 +516,7 @@ pub fn build(
     // ── Hide on focus loss (click outside) ───────────────────────────────────
     // Debounce: GNOME can briefly revoke is-active during compositor animations
     // or D-Bus events. Only hide if inactive for 150 ms straight.
+    // Skip hide while a prefs window is open (prefs_open flag set by gear button).
     {
         let hide_timer: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
         let search_entry_weak = search_entry.downgrade();
@@ -523,8 +530,12 @@ pub fn build(
             let win_weak = win.downgrade();
             let entry_weak = search_entry_weak.clone();
             let timer = hide_timer.clone();
+            let prefs_open = prefs_open.clone();
             let new_id = glib::timeout_add_local_once(Duration::from_millis(150), move || {
                 timer.set(None);
+                if prefs_open.get() {
+                    return;
+                }
                 if let Some(win) = win_weak.upgrade() {
                     if !win.is_active() {
                         if let Some(entry) = entry_weak.upgrade() {

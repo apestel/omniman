@@ -4,7 +4,7 @@ use gtk4::prelude::*;
 use libadwaita::prelude::*;
 use omniman_core::config::Config;
 
-pub fn build(parent: Option<&impl IsA<gtk4::Window>>) {
+pub fn build(parent: Option<&impl IsA<gtk4::Window>>) -> libadwaita::PreferencesWindow {
     let config = Rc::new(RefCell::new(Config::load().unwrap_or_default()));
 
     let win = libadwaita::PreferencesWindow::builder()
@@ -22,6 +22,7 @@ pub fn build(parent: Option<&impl IsA<gtk4::Window>>) {
     build_clipboard_page(&win, Rc::clone(&config));
 
     win.present();
+    win
 }
 
 fn build_general_page(win: &libadwaita::PreferencesWindow, config: Rc<RefCell<Config>>) {
