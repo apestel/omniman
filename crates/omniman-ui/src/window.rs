@@ -486,18 +486,59 @@ pub fn build(
                             ai_stack.set_visible_child_name("response");
                         }
                         accumulated.push_str(&chunk);
-                        let mut end = ai_buffer.end_iter();
-                        ai_buffer.insert(&mut end, &chunk);
+                        // Animate word-by-word: Gemini sends large chunks all at once,
+                        // so we pace the display ourselves to create a streaming effect.
+                        for word in chunk.split_inclusive(|c: char| c.is_whitespace()) {
+                            let mut end = ai_buffer.end_iter();
+                            ai_buffer.insert(&mut end, word);
+                            glib::timeout_future(Duration::from_millis(8)).await;
+                        }
                     }
                     AiMsg::Done => {
                         spinner.stop();
                         ai_stack.set_visible_child_name("response");
+                        // Apply markdown formatting after streaming is complete.
+                        // render_markdown clears and rewrites the buffer in one shot,
+                        // which is fine now that all text has already been animated in.
                         render_markdown(&ai_buffer, &accumulated);
                     }
                 }
             }
         }
     });
+
+    // ── Hide on focus loss (click outside) ───────────────────────────────────
+    // Debounce: GNOME can briefly revoke is-active during compositor animations
+    // or D-Bus events. Only hide if inactive for 150 ms straight.
+    {
+        let hide_timer: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
+        let search_entry_weak = search_entry.downgrade();
+        window.connect_is_active_notify(move |win| {
+            if win.is_active() {
+                if let Some(id) = hide_timer.take() {
+                    id.remove();
+                }
+                return;
+            }
+            let win_weak = win.downgrade();
+            let entry_weak = search_entry_weak.clone();
+            let timer = hide_timer.clone();
+            let new_id = glib::timeout_add_local_once(Duration::from_millis(150), move || {
+                timer.set(None);
+                if let Some(win) = win_weak.upgrade() {
+                    if !win.is_active() {
+                        if let Some(entry) = entry_weak.upgrade() {
+                            entry.set_text("");
+                        }
+                        win.set_visible(false);
+                    }
+                }
+            });
+            if let Some(old) = hide_timer.replace(Some(new_id)) {
+                old.remove();
+            }
+        });
+    }
 
     // ── ShowUi signal ─────────────────────────────────────────────────────────
     glib::spawn_future_local({
