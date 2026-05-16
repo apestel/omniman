@@ -377,25 +377,38 @@ pub fn build(
                     glib::Propagation::Stop
                 }
                 gdk::Key::Return | gdk::Key::KP_Enter => {
-                    let active = stack.visible_child_name().unwrap_or_default();
-                    match active.as_str() {
-                        "files" => {
-                            let row = files_list
-                                .selected_row()
-                                .or_else(|| files_list.row_at_index(0));
-                            if let Some(row) = row {
-                                row.activate();
-                            }
+                    let focus_on_entry = window_weak
+                        .upgrade()
+                        .and_then(|win| gtk4::prelude::GtkWindowExt::focus(&win))
+                        .and_then(|w: gtk4::Widget| w.downcast::<gtk4::SearchEntry>().ok())
+                        .map_or(false, |w| w == search_entry);
+                    if focus_on_entry {
+                        let query = search_entry.text().to_string();
+                        if !query.trim().is_empty() {
+                            btn_ai.set_active(true);
+                            start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
                         }
-                        "clipboard" => {
-                            let row = clip_list
-                                .selected_row()
-                                .or_else(|| clip_list.row_at_index(0));
-                            if let Some(row) = row {
-                                row.activate();
+                    } else {
+                        let active = stack.visible_child_name().unwrap_or_default();
+                        match active.as_str() {
+                            "files" => {
+                                let row = files_list
+                                    .selected_row()
+                                    .or_else(|| files_list.row_at_index(0));
+                                if let Some(row) = row {
+                                    row.activate();
+                                }
                             }
+                            "clipboard" => {
+                                let row = clip_list
+                                    .selected_row()
+                                    .or_else(|| clip_list.row_at_index(0));
+                                if let Some(row) = row {
+                                    row.activate();
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                     glib::Propagation::Stop
                 }
@@ -405,12 +418,28 @@ pub fn build(
     }
     window.add_controller(key_ctrl);
 
+    // SearchEntry also captures Enter (emits activate) without bubbling it up,
+    // so the window key controller never sees it either. Handle AI dispatch here.
+    search_entry.connect_activate({
+        let btn_ai = btn_ai.clone();
+        let ai_req_tx = ai_req_tx.clone();
+        let ai_stack = ai_stack.clone();
+        let spinner = spinner.clone();
+        let ai_buffer = ai_buffer.clone();
+        move |entry| {
+            let query = entry.text().to_string();
+            if !query.trim().is_empty() {
+                btn_ai.set_active(true);
+                start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
+            }
+        }
+    });
+
     // SearchEntry captures Escape and emits stop-search without bubbling the
     // event further, so the key controller above never sees it.  Handle it here.
     search_entry.connect_stop_search({
         let window_weak = window.downgrade();
-        move |entry| {
-            entry.set_text("");
+        move |_entry| {
             if let Some(win) = window_weak.upgrade() {
                 win.set_visible(false);
             }
@@ -569,7 +598,6 @@ pub fn build(
     // Skip hide while a prefs window is open (prefs_open flag set by gear button).
     {
         let hide_timer: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
-        let search_entry_weak = search_entry.downgrade();
         window.connect_is_active_notify(move |win| {
             if win.is_active() {
                 if let Some(id) = hide_timer.take() {
@@ -578,7 +606,6 @@ pub fn build(
                 return;
             }
             let win_weak = win.downgrade();
-            let entry_weak = search_entry_weak.clone();
             let timer = hide_timer.clone();
             let prefs_open = prefs_open.clone();
             let new_id = glib::timeout_add_local_once(Duration::from_millis(150), move || {
@@ -588,9 +615,6 @@ pub fn build(
                 }
                 if let Some(win) = win_weak.upgrade() {
                     if !win.is_active() {
-                        if let Some(entry) = entry_weak.upgrade() {
-                            entry.set_text("");
-                        }
                         win.set_visible(false);
                     }
                 }
@@ -609,9 +633,6 @@ pub fn build(
         async move {
             while show_rx.recv().await.is_ok() {
                 if let Some(win) = window_weak.upgrade() {
-                    if let Some(e) = search_entry_weak.upgrade() {
-                        e.set_text("");
-                    }
                     // set_visible ensures the window is un-hidden before present()
                     // raises it; present() alone may not re-show a widget-hidden
                     // window on some GTK4 Wayland backends.
@@ -619,6 +640,7 @@ pub fn build(
                     win.present();
                     if let Some(e) = search_entry_weak.upgrade() {
                         e.grab_focus();
+                        e.set_position(-1);
                     }
                     // Always refresh clipboard on show: the window may have been
                     // hidden by click-outside while the clipboard tab was active,
