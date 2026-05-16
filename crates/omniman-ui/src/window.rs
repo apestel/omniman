@@ -1,10 +1,14 @@
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{cell::{Cell, RefCell}, rc::Rc, time::Duration};
 
 use gtk4::{gdk, glib, prelude::*};
 use libadwaita::prelude::*;
-use omniman_core::types::{ClipEntry, Hit};
+use omniman_ai::ChatTurn;
+use omniman_core::{config::Config, types::{ClipEntry, Hit}};
 
-use crate::AiMsg;
+use crate::{
+    chat::ChatStore,
+    ChatMsg, ChatReq,
+};
 
 pub fn build(
     app: &libadwaita::Application,
@@ -13,16 +17,22 @@ pub fn build(
     show_rx: async_channel::Receiver<()>,
     clip_req_tx: async_channel::Sender<()>,
     clip_result_rx: async_channel::Receiver<Vec<ClipEntry>>,
-    ai_req_tx: async_channel::Sender<String>,
-    ai_result_rx: async_channel::Receiver<AiMsg>,
+    chat_req_tx: async_channel::Sender<ChatReq>,
+    chat_msg_rx: async_channel::Receiver<ChatMsg>,
 ) -> libadwaita::ApplicationWindow {
     load_css();
+
+    // Open chat store — Config::data_dir() resolves XDG_DATA_HOME/omniman/
+    let chat_db_path = Config::data_dir().join("chat.db");
+    let chat_store = Rc::new(RefCell::new(
+        ChatStore::open(&chat_db_path).expect("open chat.db"),
+    ));
 
     let window = libadwaita::ApplicationWindow::builder()
         .application(app)
         .title("Omniman")
-        .default_width(660)
-        .default_height(480)
+        .default_width(720)
+        .default_height(520)
         .decorated(false)
         .css_classes(["omniman-launcher"])
         .hide_on_close(true)
@@ -32,7 +42,7 @@ pub fn build(
     let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     root.add_css_class("omniman-root");
 
-    // ── Search row (entry + Ask AI button) ───────────────────────────────────
+    // ── Search row ────────────────────────────────────────────────────────────
     let search_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
 
     let search_entry = gtk4::SearchEntry::builder()
@@ -130,72 +140,76 @@ pub fn build(
         .child(&clip_list)
         .build();
 
-    // ── AI panel ─────────────────────────────────────────────────────────────
-    let ai_panel = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    // ── AI panel: sidebar + thread pane ──────────────────────────────────────
+    let ai_panel = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
 
-    // Loading state: spinner + label
-    let spinner_box = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
-    spinner_box.set_valign(gtk4::Align::Center);
-    spinner_box.set_vexpand(true);
-    let spinner = gtk4::Spinner::new();
-    spinner.set_size_request(32, 32);
-    spinner.set_halign(gtk4::Align::Center);
-    let spinner_label = gtk4::Label::builder()
-        .label("Asking Gemini…")
-        .css_classes(["omniman-placeholder"])
-        .halign(gtk4::Align::Center)
+    // — Sidebar —
+    let sidebar = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    sidebar.add_css_class("omniman-chat-sidebar");
+
+    let conv_list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::Single)
+        .css_classes(["omniman-conv-list"])
         .build();
-    spinner_box.append(&spinner);
-    spinner_box.append(&spinner_label);
-
-    // Response text view
-    let ai_buffer = gtk4::TextBuffer::new(None);
-    setup_text_tags(&ai_buffer);
-    let ai_text_view = gtk4::TextView::builder()
-        .buffer(&ai_buffer)
-        .editable(false)
-        .cursor_visible(false)
-        .wrap_mode(gtk4::WrapMode::WordChar)
-        .left_margin(16)
-        .right_margin(16)
-        .top_margin(12)
-        .bottom_margin(12)
-        .css_classes(["omniman-ai-text"])
-        .build();
-
-    let ai_scroll = gtk4::ScrolledWindow::builder()
+    let conv_scroll = gtk4::ScrolledWindow::builder()
         .vexpand(true)
         .hscrollbar_policy(gtk4::PolicyType::Never)
-        .child(&ai_text_view)
+        .child(&conv_list)
         .build();
 
-    // Rate-limit state: centred message + countdown + progress bar
-    let rl_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    rl_box.set_valign(gtk4::Align::Center);
-    rl_box.set_vexpand(true);
-    let rl_title = gtk4::Label::builder()
-        .label("Rate limited — quota exceeded")
-        .css_classes(["omniman-placeholder"])
-        .halign(gtk4::Align::Center)
+    let new_chat_btn = gtk4::Button::builder()
+        .label("＋ New chat")
+        .css_classes(["omniman-newchat-btn", "flat"])
         .build();
-    let rl_countdown = gtk4::Label::builder()
-        .label("")
-        .halign(gtk4::Align::Center)
-        .build();
-    let rl_bar = gtk4::ProgressBar::new();
-    rl_bar.set_margin_start(32);
-    rl_bar.set_margin_end(32);
-    rl_box.append(&rl_title);
-    rl_box.append(&rl_countdown);
-    rl_box.append(&rl_bar);
 
-    // Stack: loading | response | rate-limit
-    let ai_stack = gtk4::Stack::new();
-    ai_stack.add_named(&spinner_box, Some("loading"));
-    ai_stack.add_named(&ai_scroll, Some("response"));
-    ai_stack.add_named(&rl_box, Some("rate-limit"));
-    ai_stack.set_visible_child_name("response");
-    ai_panel.append(&ai_stack);
+    sidebar.append(&conv_scroll);
+    sidebar.append(&new_chat_btn);
+
+    // — Thread pane —
+    let thread_pane = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    thread_pane.set_hexpand(true);
+
+    let thread_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    thread_box.add_css_class("omniman-chat-thread");
+
+    let thread_scroll = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .child(&thread_box)
+        .build();
+
+    // Auto-scroll to bottom when content grows
+    {
+        let adj = thread_scroll.vadjustment();
+        adj.connect_notify_local(Some("upper"), |a, _| {
+            a.set_value(a.upper() - a.page_size());
+        });
+    }
+
+    // — Input row —
+    let input_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    input_row.add_css_class("omniman-chat-input");
+
+    let chat_entry = gtk4::Entry::builder()
+        .placeholder_text("Continue conversation…")
+        .hexpand(true)
+        .css_classes(["omniman-chat-entry"])
+        .build();
+
+    let send_btn = gtk4::Button::builder()
+        .label("Send")
+        .css_classes(["suggested-action", "omniman-send-btn"])
+        .build();
+
+    input_row.append(&chat_entry);
+    input_row.append(&send_btn);
+
+    thread_pane.append(&thread_scroll);
+    thread_pane.append(&input_row);
+
+    ai_panel.append(&sidebar);
+    ai_panel.append(&gtk4::Separator::new(gtk4::Orientation::Vertical));
+    ai_panel.append(&thread_pane);
 
     // ── Main stack ────────────────────────────────────────────────────────────
     let stack = gtk4::Stack::new();
@@ -211,7 +225,30 @@ pub fn build(
     root.append(&stack);
     window.set_content(Some(&root));
 
-    // ── Gear button → preferences window ─────────────────────────────────────
+    // ── State ─────────────────────────────────────────────────────────────────
+    // current_conv_id: None = next user turn creates a new conversation
+    let current_conv_id: Rc<Cell<Option<i64>>> = Rc::new(Cell::new(None));
+    // in-flight streaming buffer for the assistant turn
+    let pending_buffer: Rc<RefCell<Option<gtk4::TextBuffer>>> = Rc::new(RefCell::new(None));
+    // true while a request is in flight (prevents double-sends)
+    let streaming: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // holds the title placeholder for the current new conversation
+    let new_conv_title_row: Rc<RefCell<Option<(i64, libadwaita::ActionRow)>>> =
+        Rc::new(RefCell::new(None));
+
+    // ── Load existing conversations into sidebar ───────────────────────────────
+    {
+        let convs = chat_store
+            .borrow()
+            .list_conversations(200)
+            .unwrap_or_default();
+        for conv in convs {
+            let row = make_conv_row(&conv.title, conv.id);
+            conv_list.append(&row);
+        }
+    }
+
+    // ── Gear → preferences ───────────────────────────────────────────────────
     let prefs_open: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     gear_btn.connect_clicked({
         let window_weak = window.downgrade();
@@ -226,32 +263,108 @@ pub fn build(
         }
     });
 
-    // ── "Ask AI" button → trigger AI request ─────────────────────────────────
+    // ── Helper: send a chat turn ──────────────────────────────────────────────
+    // Returns false if nothing was sent (empty text or already streaming).
+    let send_turn = {
+        let chat_req_tx = chat_req_tx.clone();
+        let chat_store = Rc::clone(&chat_store);
+        let current_conv_id = Rc::clone(&current_conv_id);
+        let pending_buffer = Rc::clone(&pending_buffer);
+        let streaming = Rc::clone(&streaming);
+        let thread_box = thread_box.clone();
+        let conv_list = conv_list.clone();
+        let new_conv_title_row = Rc::clone(&new_conv_title_row);
+
+        Rc::new(move |text: String| -> bool {
+            let text = text.trim().to_owned();
+            if text.is_empty() || streaming.get() {
+                return false;
+            }
+            streaming.set(true);
+
+            // Ensure there's a current conversation
+            let conv_id = if let Some(id) = current_conv_id.get() {
+                id
+            } else {
+                let id = chat_store
+                    .borrow()
+                    .create_conversation("New conversation")
+                    .expect("create conversation");
+                current_conv_id.set(Some(id));
+                // Add placeholder row to top of sidebar
+                let row = make_conv_row("New conversation", id);
+                if let Some(first) = conv_list.row_at_index(0) {
+                    conv_list.insert(&row, 0);
+                    let _ = first; // keep borrow alive
+                } else {
+                    conv_list.append(&row);
+                }
+                conv_list.select_row(conv_list.row_at_index(0).as_ref());
+                new_conv_title_row.borrow_mut().replace((id, row));
+                id
+            };
+
+            // Persist user message
+            if let Err(e) = chat_store.borrow().append_message(conv_id, "user", &text) {
+                tracing::warn!(conv_id, "failed to persist user message: {e}");
+            }
+
+            // Build history from store
+            let stored = chat_store.borrow().messages(conv_id).unwrap_or_else(|e| {
+                tracing::warn!(conv_id, "failed to load messages: {e}");
+                vec![]
+            });
+            let history: Vec<ChatTurn> = stored
+                .iter()
+                .map(|m| {
+                    if m.role == "user" {
+                        ChatTurn::user(&m.content)
+                    } else {
+                        ChatTurn::assistant(&m.content)
+                    }
+                })
+                .collect();
+
+            tracing::debug!(conv_id, turns = history.len(), "sending NewTurn");
+
+            // Render user bubble
+            append_user_bubble(&thread_box, &text);
+
+            // Create empty assistant bubble with a new buffer
+            let buf = gtk4::TextBuffer::new(None);
+            setup_text_tags(&buf);
+            append_assistant_bubble(&thread_box, &buf);
+            *pending_buffer.borrow_mut() = Some(buf);
+
+            if let Err(e) = chat_req_tx.try_send(ChatReq::NewTurn { conv_id, history }) {
+                tracing::warn!(conv_id, "chat_req channel full, dropping NewTurn: {e}");
+                streaming.set(false);
+                return false;
+            }
+            true
+        })
+    };
+
+    // ── "Ask AI" button ───────────────────────────────────────────────────────
     ask_btn.connect_clicked({
         let search_entry = search_entry.clone();
-        let ai_req_tx = ai_req_tx.clone();
         let btn_ai = btn_ai.clone();
-        let ai_stack = ai_stack.clone();
-        let spinner = spinner.clone();
-        let ai_buffer = ai_buffer.clone();
+        let send_turn = Rc::clone(&send_turn);
+        let current_conv_id = Rc::clone(&current_conv_id);
         move |_| {
             let query = search_entry.text().to_string();
-            if query.trim().is_empty() {
-                return;
-            }
+            if query.trim().is_empty() { return; }
+            // Ask AI button always starts a new conversation
+            current_conv_id.set(None);
             btn_ai.set_active(true);
-            start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
+            send_turn(query);
         }
     });
 
     // ── Tab switching ─────────────────────────────────────────────────────────
     btn_files.connect_toggled({
         let stack = stack.clone();
-        move |btn| {
-            if btn.is_active() {
-                stack.set_visible_child_name("files");
-            }
-        }
+        move |btn| { if btn.is_active() { stack.set_visible_child_name("files"); } }
     });
 
     btn_clipboard.connect_toggled({
@@ -267,47 +380,27 @@ pub fn build(
 
     btn_ai.connect_toggled({
         let stack = stack.clone();
-        let search_entry = search_entry.clone();
-        let ai_req_tx = ai_req_tx.clone();
-        let ai_stack = ai_stack.clone();
-        let spinner = spinner.clone();
-        let ai_buffer = ai_buffer.clone();
         move |btn| {
             if btn.is_active() {
                 stack.set_visible_child_name("ai");
-                let query = search_entry.text().to_string();
-                if !query.trim().is_empty() {
-                    start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
-                }
             }
         }
     });
 
-    // ── Debounced file search + Ask AI visibility ─────────────────────────────
+    // ── Debounced file search ─────────────────────────────────────────────────
     let debounce: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
-
     search_entry.connect_changed({
         let debounce = Rc::clone(&debounce);
         let query_tx = query_tx.clone();
         let btn_files = btn_files.clone();
         move |entry| {
-            if let Some(id) = debounce.take() {
-                id.remove();
-            }
+            if let Some(id) = debounce.take() { id.remove(); }
             let text = entry.text().to_string();
-
-            if text.trim().is_empty() {
-                return;
-            }
-            if !btn_files.is_active() {
-                btn_files.set_active(true);
-            }
+            if text.trim().is_empty() { return; }
+            if !btn_files.is_active() { btn_files.set_active(true); }
             let qt = query_tx.clone();
             let debounce_cb = Rc::clone(&debounce);
             let id = glib::timeout_add_local_once(Duration::from_millis(200), move || {
-                // Clear the stored ID before firing — if connect_changed runs
-                // after this, debounce.take() returns None and avoids a stale
-                // SourceId::remove() panic.
                 debounce_cb.set(None);
                 let _ = qt.try_send(text);
             });
@@ -315,136 +408,147 @@ pub fn build(
         }
     });
 
-    // ── Keyboard navigation ───────────────────────────────────────────────────
-    let key_ctrl = gtk4::EventControllerKey::new();
-    {
-        let stack = stack.clone();
-        let btn_files = btn_files.clone();
-        let btn_clipboard = btn_clipboard.clone();
-        let btn_ai = btn_ai.clone();
-        let files_list = files_list.clone();
-        let clip_list = clip_list.clone();
-        let search_entry = search_entry.clone();
-        let ai_req_tx = ai_req_tx.clone();
-        let ai_stack = ai_stack.clone();
-        let spinner = spinner.clone();
-        let ai_buffer = ai_buffer.clone();
-        let window_weak = window.downgrade();
-        key_ctrl.connect_key_pressed(move |_, key, _, mods| {
-            match key {
-                // Escape when focus is on a list row or any non-entry widget.
-                // When the search entry has focus it handles Escape itself and
-                // emits stop-search (see connect_stop_search below) — that
-                // signal stops propagation so this branch is never reached then.
-                gdk::Key::Escape => {
-                    if let Some(win) = window_weak.upgrade() {
-                        win.set_visible(false);
-                    }
-                    glib::Propagation::Stop
-                }
-                gdk::Key::l if mods.contains(gdk::ModifierType::CONTROL_MASK) => {
-                    search_entry.grab_focus();
-                    search_entry.select_region(0, -1);
-                    glib::Propagation::Stop
-                }
-                gdk::Key::Tab if mods.contains(gdk::ModifierType::CONTROL_MASK) => {
-                    if btn_files.is_active() {
-                        btn_clipboard.set_active(true);
-                    } else if btn_clipboard.is_active() {
-                        btn_ai.set_active(true);
-                    } else {
-                        btn_files.set_active(true);
-                    }
-                    glib::Propagation::Stop
-                }
-                gdk::Key::Return | gdk::Key::KP_Enter
-                    if mods.contains(gdk::ModifierType::CONTROL_MASK) =>
-                {
-                    // Ctrl+Enter → Ask AI.
-                    let query = search_entry.text().to_string();
-                    if !query.trim().is_empty() {
-                        btn_ai.set_active(true);
-                        start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
-                    }
-                    glib::Propagation::Stop
-                }
-                gdk::Key::Down => {
-                    let active = stack.visible_child_name().unwrap_or_default();
-                    let list = if active == "files" { &files_list } else { &clip_list };
-                    if let Some(row) = list.row_at_index(0) {
-                        row.grab_focus();
-                    }
-                    glib::Propagation::Stop
-                }
-                gdk::Key::Return | gdk::Key::KP_Enter => {
-                    let focus_on_entry = window_weak
-                        .upgrade()
-                        .and_then(|win| gtk4::prelude::GtkWindowExt::focus(&win))
-                        .and_then(|w: gtk4::Widget| w.downcast::<gtk4::SearchEntry>().ok())
-                        .map_or(false, |w| w == search_entry);
-                    if focus_on_entry {
-                        let query = search_entry.text().to_string();
-                        if !query.trim().is_empty() {
-                            btn_ai.set_active(true);
-                            start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
-                        }
-                    } else {
-                        let active = stack.visible_child_name().unwrap_or_default();
-                        match active.as_str() {
-                            "files" => {
-                                let row = files_list
-                                    .selected_row()
-                                    .or_else(|| files_list.row_at_index(0));
-                                if let Some(row) = row {
-                                    row.activate();
-                                }
-                            }
-                            "clipboard" => {
-                                let row = clip_list
-                                    .selected_row()
-                                    .or_else(|| clip_list.row_at_index(0));
-                                if let Some(row) = row {
-                                    row.activate();
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    glib::Propagation::Stop
-                }
-                _ => glib::Propagation::Proceed,
-            }
-        });
-    }
-    window.add_controller(key_ctrl);
-
-    // SearchEntry also captures Enter (emits activate) without bubbling it up,
-    // so the window key controller never sees it either. Handle AI dispatch here.
+    // ── search_entry Enter → new conversation ─────────────────────────────────
     search_entry.connect_activate({
         let btn_ai = btn_ai.clone();
-        let ai_req_tx = ai_req_tx.clone();
-        let ai_stack = ai_stack.clone();
-        let spinner = spinner.clone();
-        let ai_buffer = ai_buffer.clone();
+        let send_turn = Rc::clone(&send_turn);
+        let current_conv_id = Rc::clone(&current_conv_id);
+        let search_entry = search_entry.clone();
         move |entry| {
             let query = entry.text().to_string();
-            if !query.trim().is_empty() {
-                btn_ai.set_active(true);
-                start_ai_request(&ai_req_tx, &ai_stack, &spinner, &ai_buffer, query);
-            }
+            if query.trim().is_empty() { return; }
+            // Top entry always starts a new conversation
+            current_conv_id.set(None);
+            btn_ai.set_active(true);
+            // Clear immediately so user sees the empty field
+            search_entry.set_text("");
+            send_turn(query);
         }
     });
 
-    // SearchEntry captures Escape and emits stop-search without bubbling the
-    // event further, so the key controller above never sees it.  Handle it here.
     search_entry.connect_stop_search({
         let window_weak = window.downgrade();
         move |_entry| {
-            if let Some(win) = window_weak.upgrade() {
-                win.set_visible(false);
-            }
+            if let Some(win) = window_weak.upgrade() { win.set_visible(false); }
         }
     });
+
+    // ── Bottom chat entry ─────────────────────────────────────────────────────
+    let send_from_chat_entry = {
+        let send_turn = Rc::clone(&send_turn);
+        let chat_entry = chat_entry.clone();
+        Rc::new(move || {
+            let text = chat_entry.text().to_string();
+            if send_turn(text) {
+                chat_entry.set_text("");
+            }
+        })
+    };
+
+    chat_entry.connect_activate({
+        let f = Rc::clone(&send_from_chat_entry);
+        move |_| f()
+    });
+
+    send_btn.connect_clicked({
+        let f = Rc::clone(&send_from_chat_entry);
+        move |_| f()
+    });
+
+    // ── "＋ New chat" button ───────────────────────────────────────────────────
+    new_chat_btn.connect_clicked({
+        let current_conv_id = Rc::clone(&current_conv_id);
+        let thread_box = thread_box.clone();
+        let search_entry = search_entry.clone();
+        let conv_list = conv_list.clone();
+        move |_| {
+            current_conv_id.set(None);
+            clear_thread(&thread_box);
+            conv_list.unselect_all();
+            search_entry.grab_focus();
+        }
+    });
+
+    // ── Conversation list click → load thread ─────────────────────────────────
+    conv_list.connect_row_activated({
+        let chat_store = Rc::clone(&chat_store);
+        let current_conv_id = Rc::clone(&current_conv_id);
+        let thread_box = thread_box.clone();
+        let chat_entry = chat_entry.clone();
+        let btn_ai = btn_ai.clone();
+        let stack = stack.clone();
+        move |_, row| {
+            let conv_id = conv_id_from_row(row);
+            current_conv_id.set(Some(conv_id));
+            clear_thread(&thread_box);
+            let msgs = chat_store.borrow().messages(conv_id).unwrap_or_default();
+            for msg in &msgs {
+                if msg.role == "user" {
+                    append_user_bubble(&thread_box, &msg.content);
+                } else {
+                    let buf = gtk4::TextBuffer::new(None);
+                    setup_text_tags(&buf);
+                    render_markdown(&buf, &msg.content);
+                    append_assistant_bubble(&thread_box, &buf);
+                }
+            }
+            btn_ai.set_active(true);
+            stack.set_visible_child_name("ai");
+            chat_entry.grab_focus();
+        }
+    });
+
+    // ── Right-click on conv row → delete ─────────────────────────────────────
+    // Attached per-row in make_conv_row_with_menu below — we wire delete here.
+    // We use a signal on the conv_list itself via GestureClick so we always
+    // have access to chat_store / current_conv_id.
+    {
+        let chat_store = Rc::clone(&chat_store);
+        let current_conv_id = Rc::clone(&current_conv_id);
+        let thread_box_weak = thread_box.downgrade();
+        let conv_list_weak = conv_list.downgrade();
+        let delete_gesture = gtk4::GestureClick::new();
+        delete_gesture.set_button(3);
+        delete_gesture.connect_pressed({
+            let chat_store = Rc::clone(&chat_store);
+            let current_conv_id = Rc::clone(&current_conv_id);
+            move |_gesture, _, _x, y| {
+                let Some(conv_list) = conv_list_weak.upgrade() else { return };
+                let Some(row) = conv_list.row_at_y(y as i32) else { return };
+                let conv_id = conv_id_from_row(&row);
+
+                // Build a simple popover with a delete button
+                let delete_btn = gtk4::Button::builder()
+                    .label("Delete")
+                    .css_classes(["destructive-action"])
+                    .build();
+                let popover = gtk4::Popover::new();
+                popover.set_child(Some(&delete_btn));
+                popover.set_parent(&row);
+                popover.popup();
+
+                let store = Rc::clone(&chat_store);
+                let cid = Rc::clone(&current_conv_id);
+                let thread_box_weak2 = thread_box_weak.clone();
+                let row_weak = row.downgrade();
+                let popover_weak = popover.downgrade();
+                delete_btn.connect_clicked(move |_| {
+                    store.borrow().delete(conv_id).ok();
+                    if cid.get() == Some(conv_id) {
+                        cid.set(None);
+                        if let Some(tb) = thread_box_weak2.upgrade() { clear_thread(&tb); }
+                    }
+                    if let Some(r) = row_weak.upgrade() {
+                        if let Some(lb) = r.parent().and_then(|p| p.downcast::<gtk4::ListBox>().ok()) {
+                            lb.remove(&r);
+                        }
+                    }
+                    if let Some(p) = popover_weak.upgrade() { p.popdown(); }
+                });
+            }
+        });
+        conv_list.add_controller(delete_gesture);
+    }
 
     // ── File row activation ───────────────────────────────────────────────────
     files_list.connect_row_activated(|_, row| {
@@ -474,9 +578,7 @@ pub fn build(
         let files_list = files_list.clone();
         async move {
             while let Ok(hits) = result_rx.recv().await {
-                while let Some(child) = files_list.first_child() {
-                    files_list.remove(&child);
-                }
+                while let Some(child) = files_list.first_child() { files_list.remove(&child); }
                 for hit in &hits {
                     let row = libadwaita::ActionRow::builder()
                         .title(glib::markup_escape_text(&hit.filename))
@@ -497,9 +599,7 @@ pub fn build(
         let clip_list = clip_list.clone();
         async move {
             while let Ok(entries) = clip_result_rx.recv().await {
-                while let Some(child) = clip_list.first_child() {
-                    clip_list.remove(&child);
-                }
+                while let Some(child) = clip_list.first_child() { clip_list.remove(&child); }
                 for entry in &entries {
                     let preview: String = entry.content.chars().take(120).collect();
                     let row = libadwaita::ActionRow::builder()
@@ -521,88 +621,157 @@ pub fn build(
         }
     });
 
-    // ── Receive AI response ───────────────────────────────────────────────────
+    // ── Receive chat messages ─────────────────────────────────────────────────
     glib::spawn_future_local({
-        let ai_buffer = ai_buffer.clone();
-        let ai_stack = ai_stack.clone();
-        let spinner = spinner.clone();
-        let rl_countdown = rl_countdown.clone();
-        let rl_bar = rl_bar.clone();
+        let pending_buffer = Rc::clone(&pending_buffer);
+        let streaming = Rc::clone(&streaming);
+        let chat_store = Rc::clone(&chat_store);
+        let chat_req_tx = chat_req_tx.clone();
+        let conv_list = conv_list.clone();
+        let new_conv_title_row = Rc::clone(&new_conv_title_row);
+        let chat_entry = chat_entry.clone();
         async move {
-            let mut accumulated = String::new();
-            // Holds a running rate-limit countdown; cancelled on the next Start.
             let countdown_timer: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
-            while let Ok(msg) = ai_result_rx.recv().await {
+            while let Ok(msg) = chat_msg_rx.recv().await {
                 match msg {
-                    AiMsg::Start => {
-                        if let Some(id) = countdown_timer.take() {
-                            id.remove();
-                        }
-                        accumulated.clear();
-                        ai_buffer.set_text("");
-                        spinner.start();
-                        ai_stack.set_visible_child_name("loading");
+                    ChatMsg::Start { .. } => {
+                        if let Some(id) = countdown_timer.take() { id.remove(); }
                     }
-                    AiMsg::Chunk(chunk) => {
-                        if accumulated.is_empty() {
-                            spinner.stop();
-                            ai_stack.set_visible_child_name("response");
-                        }
-                        accumulated.push_str(&chunk);
-                        // Animate word-by-word: Gemini sends large chunks all at once,
-                        // so we pace the display ourselves to create a streaming effect.
-                        for word in chunk.split_inclusive(|c: char| c.is_whitespace()) {
-                            let mut end = ai_buffer.end_iter();
-                            ai_buffer.insert(&mut end, word);
-                            glib::timeout_future(Duration::from_millis(8)).await;
+                    ChatMsg::Chunk { text, .. } => {
+                        if let Some(buf) = pending_buffer.borrow().as_ref() {
+                            animate_into(buf, &text).await;
                         }
                     }
-                    AiMsg::Done => {
-                        spinner.stop();
-                        ai_stack.set_visible_child_name("response");
-                        // Apply markdown formatting after streaming is complete.
-                        // render_markdown clears and rewrites the buffer in one shot,
-                        // which is fine now that all text has already been animated in.
-                        render_markdown(&ai_buffer, &accumulated);
+                    ChatMsg::Done { conv_id, full_text } => {
+                        tracing::debug!(conv_id, chars = full_text.len(), "Done received");
+                        // Apply markdown rendering
+                        if let Some(buf) = pending_buffer.borrow().as_ref() {
+                            render_markdown(buf, &full_text);
+                        }
+                        *pending_buffer.borrow_mut() = None;
+
+                        // Persist assistant message
+                        if let Err(e) = chat_store.borrow().append_message(conv_id, "assistant", &full_text) {
+                            tracing::warn!(conv_id, "failed to persist assistant message: {e}");
+                        }
+
+                        streaming.set(false);
+                        chat_entry.grab_focus();
+
+                        // Request title generation if this is the first reply for a new conv
+                        let msg_count = chat_store.borrow().message_count(conv_id).unwrap_or(0);
+                        if msg_count == 2 {
+                            // exactly one user + one assistant message
+                            let msgs = chat_store.borrow().messages(conv_id).unwrap_or_default();
+                            if let (Some(u), Some(a)) = (msgs.first(), msgs.get(1)) {
+                                let _ = chat_req_tx.try_send(ChatReq::Summarize {
+                                    conv_id,
+                                    user_msg: u.content.clone(),
+                                    assistant_msg: a.content.clone(),
+                                });
+                            }
+                        }
                     }
-                    AiMsg::RateLimit(total_secs) => {
-                        spinner.stop();
-                        rl_countdown.set_label(&format_countdown(total_secs));
-                        rl_bar.set_fraction(0.0);
-                        ai_stack.set_visible_child_name("rate-limit");
-                        let remaining = Rc::new(Cell::new(total_secs));
-                        let label = rl_countdown.clone();
-                        let bar = rl_bar.clone();
-                        let id = glib::timeout_add_local(Duration::from_secs(1), move || {
-                            let r = remaining.get().saturating_sub(1);
-                            remaining.set(r);
-                            bar.set_fraction((total_secs - r) as f64 / total_secs as f64);
-                            if r == 0 {
-                                label.set_label("Ready — you can ask again.");
-                                glib::ControlFlow::Break
-                            } else {
-                                label.set_label(&format_countdown(r));
-                                glib::ControlFlow::Continue
+                    ChatMsg::RateLimit { conv_id: _, secs } => {
+                        // Replace pending buffer content with rate-limit message
+                        if let Some(buf) = pending_buffer.borrow().as_ref() {
+                            buf.set_text(&format!("Rate limited — retry in {secs}s"));
+                        }
+                        *pending_buffer.borrow_mut() = None;
+                        streaming.set(false);
+
+                        let remaining = Rc::new(Cell::new(secs));
+                        let id = glib::timeout_add_local(Duration::from_secs(1), {
+                            let pending_buffer = Rc::clone(&pending_buffer);
+                            move || {
+                                let r = remaining.get().saturating_sub(1);
+                                remaining.set(r);
+                                if r == 0 {
+                                    glib::ControlFlow::Break
+                                } else {
+                                    // No buffer to update (already None), just tick
+                                    let _ = (pending_buffer.borrow(), r);
+                                    glib::ControlFlow::Continue
+                                }
                             }
                         });
                         countdown_timer.set(Some(id));
+                    }
+                    ChatMsg::Title { conv_id, title } => {
+                        // Update DB
+                        chat_store.borrow().rename(conv_id, &title).ok();
+                        // Update sidebar row label if it's the placeholder row
+                        let guard = new_conv_title_row.borrow();
+                        if let Some((id, row)) = guard.as_ref() {
+                            if *id == conv_id {
+                                row.set_title(&title);
+                            }
+                        }
+                        drop(guard);
+                        // Also update any existing row in conv_list that matches
+                        let mut child = conv_list.row_at_index(0);
+                        while let Some(row) = child {
+                            if conv_id_from_row(&row) == conv_id {
+                                if let Some(ar) = row.downcast_ref::<libadwaita::ActionRow>() {
+                                    ar.set_title(&title);
+                                }
+                                break;
+                            }
+                            child = row.next_sibling()
+                                .and_then(|w| w.downcast::<gtk4::ListBoxRow>().ok());
+                        }
                     }
                 }
             }
         }
     });
 
-    // ── Hide on focus loss (click outside) ───────────────────────────────────
-    // Debounce: GNOME can briefly revoke is-active during compositor animations
-    // or D-Bus events. Only hide if inactive for 150 ms straight.
-    // Skip hide while a prefs window is open (prefs_open flag set by gear button).
+    // ── Keyboard navigation ───────────────────────────────────────────────────
+    let key_ctrl = gtk4::EventControllerKey::new();
+    {
+        let stack = stack.clone();
+        let btn_files = btn_files.clone();
+        let btn_clipboard = btn_clipboard.clone();
+        let btn_ai = btn_ai.clone();
+        let files_list = files_list.clone();
+        let clip_list = clip_list.clone();
+        let search_entry = search_entry.clone();
+        let window_weak = window.downgrade();
+        key_ctrl.connect_key_pressed(move |_, key, _, mods| {
+            match key {
+                gdk::Key::Escape => {
+                    if let Some(win) = window_weak.upgrade() { win.set_visible(false); }
+                    glib::Propagation::Stop
+                }
+                gdk::Key::l if mods.contains(gdk::ModifierType::CONTROL_MASK) => {
+                    search_entry.grab_focus();
+                    search_entry.select_region(0, -1);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Tab if mods.contains(gdk::ModifierType::CONTROL_MASK) => {
+                    if btn_files.is_active() { btn_clipboard.set_active(true); }
+                    else if btn_clipboard.is_active() { btn_ai.set_active(true); }
+                    else { btn_files.set_active(true); }
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Down => {
+                    let active = stack.visible_child_name().unwrap_or_default();
+                    let list = if active == "files" { &files_list } else { &clip_list };
+                    if let Some(row) = list.row_at_index(0) { row.grab_focus(); }
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+    }
+    window.add_controller(key_ctrl);
+
+    // ── Hide on focus loss ────────────────────────────────────────────────────
     {
         let hide_timer: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
         window.connect_is_active_notify(move |win| {
             if win.is_active() {
-                if let Some(id) = hide_timer.take() {
-                    id.remove();
-                }
+                if let Some(id) = hide_timer.take() { id.remove(); }
                 return;
             }
             let win_weak = win.downgrade();
@@ -610,18 +779,12 @@ pub fn build(
             let prefs_open = prefs_open.clone();
             let new_id = glib::timeout_add_local_once(Duration::from_millis(150), move || {
                 timer.set(None);
-                if prefs_open.get() {
-                    return;
-                }
+                if prefs_open.get() { return; }
                 if let Some(win) = win_weak.upgrade() {
-                    if !win.is_active() {
-                        win.set_visible(false);
-                    }
+                    if !win.is_active() { win.set_visible(false); }
                 }
             });
-            if let Some(old) = hide_timer.replace(Some(new_id)) {
-                old.remove();
-            }
+            if let Some(old) = hide_timer.replace(Some(new_id)) { old.remove(); }
         });
     }
 
@@ -633,18 +796,12 @@ pub fn build(
         async move {
             while show_rx.recv().await.is_ok() {
                 if let Some(win) = window_weak.upgrade() {
-                    // set_visible ensures the window is un-hidden before present()
-                    // raises it; present() alone may not re-show a widget-hidden
-                    // window on some GTK4 Wayland backends.
                     win.set_visible(true);
                     win.present();
                     if let Some(e) = search_entry_weak.upgrade() {
                         e.grab_focus();
                         e.set_position(-1);
                     }
-                    // Always refresh clipboard on show: the window may have been
-                    // hidden by click-outside while the clipboard tab was active,
-                    // so the tab-toggle refresh never fires on re-open.
                     let _ = clip_req_tx.try_send(());
                 }
             }
@@ -659,31 +816,86 @@ pub fn build(
     window
 }
 
-fn start_ai_request(
-    ai_req_tx: &async_channel::Sender<String>,
-    ai_stack: &gtk4::Stack,
-    spinner: &gtk4::Spinner,
-    ai_buffer: &gtk4::TextBuffer,
-    query: String,
-) {
-    ai_buffer.set_text("");
-    ai_stack.set_visible_child_name("loading");
-    spinner.start();
-    let _ = ai_req_tx.try_send(query);
+// ── Widget helpers ────────────────────────────────────────────────────────────
+
+fn make_conv_row(title: &str, conv_id: i64) -> libadwaita::ActionRow {
+    let row = libadwaita::ActionRow::builder()
+        .title(glib::markup_escape_text(title))
+        .activatable(true)
+        .build();
+    // Store conv_id as widget name (cheapest way without unsafe data)
+    row.set_widget_name(&conv_id.to_string());
+    row
 }
 
-/// Populate `buffer` with markdown rendered to styled text via pulldown-cmark.
+fn conv_id_from_row(row: &gtk4::ListBoxRow) -> i64 {
+    row.widget_name().parse::<i64>().unwrap_or(-1)
+}
+
+fn clear_thread(thread_box: &gtk4::Box) {
+    while let Some(child) = thread_box.first_child() {
+        thread_box.remove(&child);
+    }
+}
+
+fn append_user_bubble(thread_box: &gtk4::Box, text: &str) {
+    let bubble = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    bubble.add_css_class("omniman-bubble-user");
+    bubble.set_hexpand(true);
+
+    let label = gtk4::Label::builder()
+        .label(text)
+        .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
+        .selectable(true)
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+
+    bubble.append(&label);
+    thread_box.append(&bubble);
+}
+
+fn append_assistant_bubble(thread_box: &gtk4::Box, buffer: &gtk4::TextBuffer) {
+    let bubble = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    bubble.add_css_class("omniman-bubble-assistant");
+    bubble.set_hexpand(true);
+
+    let text_view = gtk4::TextView::builder()
+        .buffer(buffer)
+        .editable(false)
+        .cursor_visible(false)
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .hexpand(true)
+        .left_margin(4)
+        .right_margin(4)
+        .top_margin(2)
+        .bottom_margin(2)
+        .css_classes(["omniman-ai-text"])
+        .build();
+
+    bubble.append(&text_view);
+    thread_box.append(&bubble);
+}
+
+async fn animate_into(buffer: &gtk4::TextBuffer, chunk: &str) {
+    for word in chunk.split_inclusive(|c: char| c.is_whitespace()) {
+        let mut end = buffer.end_iter();
+        buffer.insert(&mut end, word);
+        glib::timeout_future(Duration::from_millis(8)).await;
+    }
+}
+
+// ── Markdown rendering (unchanged) ───────────────────────────────────────────
+
 fn render_markdown(buffer: &gtk4::TextBuffer, text: &str) {
     use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
     buffer.set_text("");
     let mut iter = buffer.end_iter();
 
-    // Active inline tag names (bold, italic, code_block). Applied to each text insertion.
     let mut tag_stack: Vec<&'static str> = Vec::new();
-    // Stack of list kinds: None = unordered, Some(n) = ordered starting at n.
     let mut list_stack: Vec<Option<u64>> = Vec::new();
-    // Per-list item counter (incremented on each Item start).
     let mut item_counters: Vec<u64> = Vec::new();
     let mut in_list_item = false;
     let mut in_code_block = false;
@@ -693,7 +905,6 @@ fn render_markdown(buffer: &gtk4::TextBuffer, text: &str) {
 
     for event in parser {
         match event {
-            // ── Block opens ──────────────────────────────────────────────────
             Event::Start(Tag::Heading { level, .. }) => {
                 let name: &'static str = match level {
                     HeadingLevel::H1 => "h1",
@@ -704,10 +915,7 @@ fn render_markdown(buffer: &gtk4::TextBuffer, text: &str) {
             }
             Event::Start(Tag::Strong) => tag_stack.push("bold"),
             Event::Start(Tag::Emphasis) => tag_stack.push("italic"),
-            Event::Start(Tag::CodeBlock(_)) => {
-                in_code_block = true;
-                tag_stack.push("code_block");
-            }
+            Event::Start(Tag::CodeBlock(_)) => { in_code_block = true; tag_stack.push("code_block"); }
             Event::Start(Tag::List(start)) => {
                 list_stack.push(start);
                 item_counters.push(start.unwrap_or(1));
@@ -717,11 +925,7 @@ fn render_markdown(buffer: &gtk4::TextBuffer, text: &str) {
                 let prefix = match list_stack.last() {
                     Some(None) => "  • ".to_owned(),
                     Some(Some(_)) => {
-                        let n = item_counters.last_mut().map(|c| {
-                            let v = *c;
-                            *c += 1;
-                            v
-                        }).unwrap_or(1);
+                        let n = item_counters.last_mut().map(|c| { let v = *c; *c += 1; v }).unwrap_or(1);
                         format!("  {}. ", n)
                     }
                     None => "  • ".to_owned(),
@@ -732,66 +936,24 @@ fn render_markdown(buffer: &gtk4::TextBuffer, text: &str) {
                 tag_stack.push("blockquote");
                 buffer.insert_with_tags_by_name(&mut iter, "▎ ", &["blockquote"]);
             }
-            Event::Start(Tag::Paragraph) => {}
-            Event::Start(_) => {}
-
-            // ── Block closes ─────────────────────────────────────────────────
-            Event::End(TagEnd::Heading(_)) => {
-                tag_stack.pop();
-                buffer.insert(&mut iter, "\n\n");
-            }
-            Event::End(TagEnd::Strong) | Event::End(TagEnd::Emphasis) => {
-                tag_stack.pop();
-            }
-            Event::End(TagEnd::CodeBlock) => {
-                in_code_block = false;
-                tag_stack.pop();
-                buffer.insert(&mut iter, "\n");
-            }
-            Event::End(TagEnd::List(_)) => {
-                list_stack.pop();
-                item_counters.pop();
-                buffer.insert(&mut iter, "\n");
-            }
-            Event::End(TagEnd::Item) => {
-                in_list_item = false;
-                buffer.insert(&mut iter, "\n");
-            }
-            Event::End(TagEnd::BlockQuote(_)) => {
-                tag_stack.pop();
-            }
-            Event::End(TagEnd::Paragraph) => {
-                if !in_list_item {
-                    buffer.insert(&mut iter, "\n\n");
-                }
-            }
+            Event::Start(Tag::Paragraph) | Event::Start(_) => {}
+            Event::End(TagEnd::Heading(_)) => { tag_stack.pop(); buffer.insert(&mut iter, "\n\n"); }
+            Event::End(TagEnd::Strong) | Event::End(TagEnd::Emphasis) => { tag_stack.pop(); }
+            Event::End(TagEnd::CodeBlock) => { in_code_block = false; tag_stack.pop(); buffer.insert(&mut iter, "\n"); }
+            Event::End(TagEnd::List(_)) => { list_stack.pop(); item_counters.pop(); buffer.insert(&mut iter, "\n"); }
+            Event::End(TagEnd::Item) => { in_list_item = false; buffer.insert(&mut iter, "\n"); }
+            Event::End(TagEnd::BlockQuote(_)) => { tag_stack.pop(); }
+            Event::End(TagEnd::Paragraph) => { if !in_list_item { buffer.insert(&mut iter, "\n\n"); } }
             Event::End(_) => {}
-
-            // ── Inline content ───────────────────────────────────────────────
             Event::Text(t) => {
                 let tags: Vec<&str> = tag_stack.clone();
-                if tags.is_empty() {
-                    buffer.insert(&mut iter, &t);
-                } else {
-                    buffer.insert_with_tags_by_name(&mut iter, &t, &tags);
-                }
+                if tags.is_empty() { buffer.insert(&mut iter, &t); }
+                else { buffer.insert_with_tags_by_name(&mut iter, &t, &tags); }
             }
-            Event::Code(t) => {
-                buffer.insert_with_tags_by_name(&mut iter, &t, &["code"]);
-            }
-            Event::SoftBreak => {
-                if in_code_block {
-                    buffer.insert(&mut iter, "\n");
-                } else {
-                    buffer.insert(&mut iter, " ");
-                }
-            }
-            Event::HardBreak => {
-                buffer.insert(&mut iter, "\n");
-            }
-            Event::Rule => {
-                buffer.insert(&mut iter, "\n");
-            }
+            Event::Code(t) => { buffer.insert_with_tags_by_name(&mut iter, &t, &["code"]); }
+            Event::SoftBreak => { buffer.insert(&mut iter, if in_code_block { "\n" } else { " " }); }
+            Event::HardBreak => { buffer.insert(&mut iter, "\n"); }
+            Event::Rule => { buffer.insert(&mut iter, "\n"); }
             _ => {}
         }
     }
@@ -800,75 +962,22 @@ fn render_markdown(buffer: &gtk4::TextBuffer, text: &str) {
 fn setup_text_tags(buffer: &gtk4::TextBuffer) {
     let table = buffer.tag_table();
 
-    let h1 = gtk4::TextTag::builder()
-        .name("h1")
-        .weight(700)
-        .scale(1.5)
-        .foreground("#f2f2f7")
-        .build();
-    let h2 = gtk4::TextTag::builder()
-        .name("h2")
-        .weight(700)
-        .scale(1.3)
-        .foreground("#f2f2f7")
-        .build();
-    let h3 = gtk4::TextTag::builder()
-        .name("h3")
-        .weight(700)
-        .scale(1.1)
-        .foreground("#f2f2f7")
-        .build();
-    let bold = gtk4::TextTag::builder()
-        .name("bold")
-        .weight(700)
-        .build();
-    let italic = gtk4::TextTag::builder()
-        .name("italic")
-        .style(gtk4::pango::Style::Italic)
-        .build();
-    let code = gtk4::TextTag::builder()
-        .name("code")
-        .family("monospace")
-        .foreground("#a8d8a8")
-        .background("rgba(0,0,0,0.3)")
-        .build();
-    let code_block = gtk4::TextTag::builder()
-        .name("code_block")
-        .family("monospace")
-        .foreground("#a8d8a8")
-        .background("rgba(0,0,0,0.4)")
-        .left_margin(24)
-        .build();
-    let bullet = gtk4::TextTag::builder()
-        .name("bullet")
-        .foreground("#8e8ea0")
-        .build();
-    let blockquote = gtk4::TextTag::builder()
-        .name("blockquote")
-        .foreground("#8e8ea0")
-        .style(gtk4::pango::Style::Italic)
-        .left_margin(16)
-        .build();
-
-    table.add(&h1);
-    table.add(&h2);
-    table.add(&h3);
-    table.add(&bold);
-    table.add(&italic);
-    table.add(&code);
-    table.add(&code_block);
-    table.add(&bullet);
-    table.add(&blockquote);
-}
-
-fn format_countdown(secs: u64) -> String {
-    let m = secs / 60;
-    let s = secs % 60;
-    if m > 0 {
-        format!("Retry in {m}m {s:02}s")
-    } else {
-        format!("Retry in {s}s")
+    macro_rules! tag {
+        ($name:expr, $($prop:ident : $val:expr),+ $(,)?) => {{
+            let t = gtk4::TextTag::builder().name($name) $( .$prop($val) )+ .build();
+            table.add(&t);
+        }};
     }
+
+    tag!("h1", weight: 700, scale: 1.5, foreground: "#f2f2f7");
+    tag!("h2", weight: 700, scale: 1.3, foreground: "#f2f2f7");
+    tag!("h3", weight: 700, scale: 1.1, foreground: "#f2f2f7");
+    tag!("bold", weight: 700);
+    tag!("italic", style: gtk4::pango::Style::Italic);
+    tag!("code", family: "monospace", foreground: "#a8d8a8", background: "rgba(0,0,0,0.3)");
+    tag!("code_block", family: "monospace", foreground: "#a8d8a8", background: "rgba(0,0,0,0.4)", left_margin: 24);
+    tag!("bullet", foreground: "#8e8ea0");
+    tag!("blockquote", foreground: "#8e8ea0", style: gtk4::pango::Style::Italic, left_margin: 16);
 }
 
 fn load_css() {

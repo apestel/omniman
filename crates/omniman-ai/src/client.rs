@@ -4,6 +4,8 @@ use reqwest::Client;
 use serde::Deserialize;
 use tracing::debug;
 
+use crate::{ChatRole, ChatTurn};
+
 #[derive(Debug, thiserror::Error)]
 #[error("rate limited: retry after {retry_after_secs}s")]
 pub struct RateLimitError {
@@ -133,18 +135,22 @@ impl GeminiClient {
         Ok(models)
     }
 
-    /// Send a prompt and stream each text chunk to `tx` as it arrives.
-    pub async fn ask_streaming(
+    /// Send a multi-turn conversation and stream each text chunk to `tx`.
+    pub async fn chat_streaming(
         &self,
-        prompt: &str,
+        turns: &[ChatTurn],
         tx: &async_channel::Sender<String>,
     ) -> Result<()> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
             self.model, self.api_key
         );
+        let contents: Vec<serde_json::Value> = turns.iter().map(|t| {
+            let role = match t.role { ChatRole::User => "user", ChatRole::Assistant => "model" };
+            serde_json::json!({"role": role, "parts": [{"text": t.content}]})
+        }).collect();
         let body = serde_json::json!({
-            "contents": [{"parts": [{"text": prompt}]}],
+            "contents": contents,
             "generationConfig": {"maxOutputTokens": 32768}
         });
 
@@ -171,20 +177,16 @@ impl GeminiClient {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("reading SSE stream")?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
-
             while let Some(nl) = line_buf.find('\n') {
                 let line = line_buf[..nl].trim_end_matches('\r').to_owned();
                 line_buf.drain(..=nl);
-
                 if let Some(data) = line.strip_prefix("data: ") {
                     if let Ok(resp) = serde_json::from_str::<StreamResponse>(data) {
                         for candidate in resp.candidates.unwrap_or_default() {
                             if let Some(content) = candidate.content {
                                 for part in content.parts.unwrap_or_default() {
                                     if let Some(text) = part.text {
-                                        if tx.send(text).await.is_err() {
-                                            return Ok(());
-                                        }
+                                        if tx.send(text).await.is_err() { return Ok(()); }
                                     }
                                 }
                             }
@@ -194,18 +196,21 @@ impl GeminiClient {
                 }
             }
         }
-
         Ok(())
     }
 
-    /// Send a prompt and collect the full response by consuming the SSE stream.
-    pub async fn ask(&self, prompt: &str) -> Result<String> {
+    /// Send a multi-turn conversation and collect the full response.
+    pub async fn chat(&self, turns: &[ChatTurn]) -> Result<String> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
             self.model, self.api_key
         );
+        let contents: Vec<serde_json::Value> = turns.iter().map(|t| {
+            let role = match t.role { ChatRole::User => "user", ChatRole::Assistant => "model" };
+            serde_json::json!({"role": role, "parts": [{"text": t.content}]})
+        }).collect();
         let body = serde_json::json!({
-            "contents": [{"parts": [{"text": prompt}]}],
+            "contents": contents,
             "generationConfig": {"maxOutputTokens": 32768}
         });
 
@@ -233,19 +238,15 @@ impl GeminiClient {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("reading SSE stream")?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
-
             while let Some(nl) = line_buf.find('\n') {
                 let line = line_buf[..nl].trim_end_matches('\r').to_owned();
                 line_buf.drain(..=nl);
-
                 if let Some(data) = line.strip_prefix("data: ") {
                     if let Ok(resp) = serde_json::from_str::<StreamResponse>(data) {
                         for candidate in resp.candidates.unwrap_or_default() {
                             if let Some(content) = candidate.content {
                                 for part in content.parts.unwrap_or_default() {
-                                    if let Some(text) = part.text {
-                                        result.push_str(&text);
-                                    }
+                                    if let Some(text) = part.text { result.push_str(&text); }
                                 }
                             }
                         }
@@ -254,7 +255,16 @@ impl GeminiClient {
                 }
             }
         }
-
         Ok(result)
+    }
+
+    /// Single-prompt streaming (convenience wrapper).
+    pub async fn ask_streaming(&self, prompt: &str, tx: &async_channel::Sender<String>) -> Result<()> {
+        self.chat_streaming(&[ChatTurn::user(prompt)], tx).await
+    }
+
+    /// Single-prompt blocking (convenience wrapper).
+    pub async fn ask(&self, prompt: &str) -> Result<String> {
+        self.chat(&[ChatTurn::user(prompt)]).await
     }
 }

@@ -4,6 +4,8 @@ use reqwest::Client;
 use serde::Deserialize;
 use tracing::debug;
 
+use crate::{ChatRole, ChatTurn};
+
 #[derive(Deserialize)]
 struct ChatChunk {
     choices: Option<Vec<Choice>>,
@@ -32,15 +34,20 @@ impl OpenAiClient {
         Self { client: Client::new(), api_key, base_url, model }
     }
 
-    pub async fn ask_streaming(
+    /// Send a multi-turn conversation and stream each text chunk to `tx`.
+    pub async fn chat_streaming(
         &self,
-        prompt: &str,
+        turns: &[ChatTurn],
         tx: &async_channel::Sender<String>,
     ) -> Result<()> {
         let url = format!("{}/chat/completions", self.base_url);
+        let messages: Vec<serde_json::Value> = turns.iter().map(|t| {
+            let role = match t.role { ChatRole::User => "user", ChatRole::Assistant => "assistant" };
+            serde_json::json!({"role": role, "content": t.content})
+        }).collect();
         let body = serde_json::json!({
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "stream": true,
             "max_tokens": 32768
         });
@@ -66,22 +73,16 @@ impl OpenAiClient {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("reading SSE stream")?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
-
             while let Some(nl) = line_buf.find('\n') {
                 let line = line_buf[..nl].trim_end_matches('\r').to_owned();
                 line_buf.drain(..=nl);
-
                 if let Some(data) = line.strip_prefix("data: ") {
-                    if data.trim() == "[DONE]" {
-                        return Ok(());
-                    }
+                    if data.trim() == "[DONE]" { return Ok(()); }
                     if let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) {
                         for choice in chunk.choices.unwrap_or_default() {
                             if let Some(delta) = choice.delta {
                                 if let Some(text) = delta.content {
-                                    if tx.send(text).await.is_err() {
-                                        return Ok(());
-                                    }
+                                    if tx.send(text).await.is_err() { return Ok(()); }
                                 }
                             }
                         }
@@ -90,7 +91,11 @@ impl OpenAiClient {
                 }
             }
         }
-
         Ok(())
+    }
+
+    /// Single-prompt streaming (convenience wrapper).
+    pub async fn ask_streaming(&self, prompt: &str, tx: &async_channel::Sender<String>) -> Result<()> {
+        self.chat_streaming(&[ChatTurn::user(prompt)], tx).await
     }
 }

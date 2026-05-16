@@ -138,3 +138,94 @@ scrollbar slider:hover {
     color: #f2f2f7;
     font-size: 14px;
 }
+
+/* Chat sidebar */
+.omniman-chat-sidebar {
+    min-width: 180px;
+}
+
+.omniman-conv-list {
+    background: transparent;
+}
+
+.omniman-conv-list row {
+    background: transparent;
+    border-radius: 6px;
+    margin: 2px 6px;
+    padding: 2px 0;
+    color: rgba(235, 235, 245, 0.7);
+    font-size: 12px;
+}
+
+.omniman-conv-list row:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: #f2f2f7;
+}
+
+.omniman-conv-list row:selected {
+    background: rgba(100, 110, 255, 0.25);
+    color: #f2f2f7;
+}
+
+.omniman-newchat-btn {
+    margin: 6px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: rgba(235, 235, 245, 0.55);
+    min-height: 0;
+    padding: 4px 10px;
+}
+
+.omniman-newchat-btn:hover {
+    color: #f2f2f7;
+    background: rgba(255, 255, 255, 0.07);
+}
+
+/* Chat thread */
+.omniman-chat-thread {
+    padding: 12px 8px;
+}
+
+.omniman-bubble-user {
+    background: rgba(100, 110, 255, 0.28);
+    border-radius: 14px 14px 4px 14px;
+    padding: 8px 12px;
+    /* large left margin gives a right-aligned appearance */
+    margin: 4px 8px 4px 72px;
+}
+
+.omniman-bubble-assistant {
+    background: rgba(255, 255, 255, 0.07);
+    border-radius: 14px 14px 14px 4px;
+    padding: 8px 12px;
+    /* large right margin gives a left-aligned appearance */
+    margin: 4px 72px 4px 8px;
+}
+
+/* Chat input row */
+.omniman-chat-input {
+    padding: 8px 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.omniman-chat-entry {
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+    color: #f2f2f7;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 13px;
+    padding: 4px 10px;
+}
+
+.omniman-chat-entry:focus {
+    border-color: rgba(100, 110, 255, 0.6);
+    box-shadow: none;
+    outline: none;
+}
+
+.omniman-send-btn {
+    border-radius: 8px;
+    font-size: 13px;
+    padding: 4px 14px;
+    min-height: 0;
+}

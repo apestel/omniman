@@ -1718,6 +1718,7 @@ dependencies = [
  "omniman-ai",
  "omniman-core",
  "pulldown-cmark",
+ "rusqlite",
  "tokio",
  "tracing",
  "tracing-subscriber",
