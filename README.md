@@ -30,7 +30,41 @@ sudo pacman -S gtk4 libadwaita sqlite wl-clipboard
 
 ## Installation
 
-### 1. Build
+### Option A — PKGBUILD (Arch Linux, recommended)
+
+```bash
+git clone https://github.com/adrien/omniman
+cd omniman
+
+# Build and install the package
+makepkg -si
+```
+
+`makepkg -si` builds, then calls `pacman -U` to install. pacman will print
+post-install instructions automatically.
+
+After install, complete setup:
+
+```bash
+# 1. Enable the daemon
+systemctl --user enable --now omnimand
+
+# 2. Register Ctrl+Space as the global shortcut
+/usr/share/omniman/setup-shortcut.sh
+# or a custom key:
+/usr/share/omniman/setup-shortcut.sh '<Super>space'
+
+# 3. Auto-start the UI at login
+cp /usr/share/applications/omniman.desktop ~/.config/autostart/
+```
+
+The daemon indexes `$HOME` on first start (background, non-blocking). Check
+progress:
+```bash
+journalctl --user -u omnimand -f
+```
+
+### Option B — Manual (from source)
 
 ```bash
 git clone https://github.com/adrien/omniman
@@ -38,72 +72,36 @@ cd omniman
 cargo build --release --workspace
 ```
 
-Binaries are at `target/release/omnimand` (daemon) and `target/release/omniman` (UI).
-
-Install them to `~/.cargo/bin/` or any directory on `$PATH`:
 ```bash
-cargo install --path crates/omniman-daemon
-cargo install --path crates/omniman-ui
-```
+# Install binaries
+install -Dm755 target/release/omnimand ~/.local/bin/omnimand
+install -Dm755 target/release/omniman  ~/.local/bin/omniman
 
-### 2. Start the daemon
-
-```bash
-# Copy the systemd unit
-cp data/systemd/omnimand.service ~/.config/systemd/user/
-
-# Enable and start
+# Install and enable the systemd unit
+install -Dm644 data/systemd/omnimand.service ~/.config/systemd/user/omnimand.service
+systemctl --user daemon-reload
 systemctl --user enable --now omnimand
 
-# Check it's running
-systemctl --user status omnimand
-journalctl --user -u omnimand -f
-```
+# Register the global shortcut
+bash data/setup-shortcut.sh
 
-The daemon indexes `$HOME` on first start (background task) and keeps the index up to date with inotify.
-
-### 3. Start the UI at login
-
-Copy the desktop entry so the UI launches automatically with your session:
-```bash
+# Auto-start the UI at login
 cp data/omniman.desktop ~/.config/autostart/
 ```
 
-Or start it manually for the current session:
-```bash
-omniman &
-```
-
-The UI runs silently in the background (`hide-on-close`). You never need to restart it.
-
-### 4. Register the keyboard shortcut
-
-```bash
-# Default: Ctrl+Space
-data/setup-shortcut.sh
-
-# Or pick your own trigger
-data/setup-shortcut.sh '<Super>space'
-```
-
-This registers a GNOME custom keybinding. The change takes effect immediately — no logout required.
-
-To remove the shortcut later:
-```bash
-data/remove-shortcut.sh
-```
-
-### 5. Gemini API key (optional)
+### Gemini API key (optional)
 
 Without a key the Files and Clipboard tabs work fully; the AI tab is disabled.
 
 ```bash
 # Store the key in the Secret Service (never written to disk in plaintext)
 secret-tool store --label "Omniman Gemini key" service omniman key gemini_api_key
-# Then set the env var for the daemon
-systemctl --user edit omnimand
 ```
 
+To pass the key to the daemon, create a drop-in override:
+```bash
+systemctl --user edit omnimand
+```
 Add under `[Service]`:
 ```ini
 Environment=GEMINI_API_KEY=your_key_here

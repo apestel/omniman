@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.adrien.OmnimanDaemon
+Exec=/usr/bin/omnimand
+SystemdService=omnimand.service

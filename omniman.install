@@ -1,0 +1,36 @@
+post_install() {
+    echo ""
+    echo "==> Omniman installed. Complete setup in 3 steps:"
+    echo ""
+    echo "  1. Enable and start the daemon:"
+    echo "       systemctl --user enable --now omnimand"
+    echo ""
+    echo "  2. Register the global keyboard shortcut (Ctrl+Space):"
+    echo "       /usr/share/omniman/setup-shortcut.sh"
+    echo "       # or a custom key: /usr/share/omniman/setup-shortcut.sh '<Super>space'"
+    echo ""
+    echo "  3. Start the UI at login (add to autostart):"
+    echo "       cp /usr/share/applications/omniman.desktop ~/.config/autostart/"
+    echo ""
+    echo "  Optional — Gemini API key (AI tab):"
+    echo "       secret-tool store --label 'Omniman Gemini key' service omniman key gemini_api_key"
+    echo ""
+}
+
+post_upgrade() {
+    echo ""
+    echo "==> Omniman upgraded. Restarting daemon..."
+    systemctl --user try-restart omnimand 2>/dev/null || true
+    echo "    Done. If the shortcut stopped working, re-run:"
+    echo "       /usr/share/omniman/setup-shortcut.sh"
+    echo ""
+}
+
+pre_remove() {
+    systemctl --user disable --now omnimand 2>/dev/null || true
+    echo ""
+    echo "==> Omniman daemon stopped and disabled."
+    echo "    To remove the keyboard shortcut:"
+    echo "       /usr/share/omniman/remove-shortcut.sh"
+    echo ""
+}

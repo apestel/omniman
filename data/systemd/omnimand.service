@@ -6,7 +6,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/omnimand
+ExecStart=/usr/bin/omnimand
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=omnimand=info
