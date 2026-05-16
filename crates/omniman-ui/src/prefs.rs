@@ -92,9 +92,38 @@ fn build_ai_page(win: &libadwaita::PreferencesWindow, config: Rc<RefCell<Config>
     // ── Gemini ────────────────────────────────────────────────────────────────
     let gemini_group = libadwaita::PreferencesGroup::builder()
         .title("Gemini (default)")
-        .description("Set GEMINI_API_KEY in omnimand's environment. Restart omnimand to apply.")
+        .description("Used for AI queries. Restart omnimand to apply.")
         .build();
     page.add(&gemini_group);
+
+    let api_key_row = libadwaita::PasswordEntryRow::builder()
+        .title("API key")
+        .text(config.borrow().ai.gemini_api_key.as_deref().unwrap_or(""))
+        .build();
+    gemini_group.add(&api_key_row);
+
+    let docs_row = libadwaita::ActionRow::builder()
+        .title("Get an API key")
+        .subtitle("Google AI Studio — aistudio.google.com")
+        .activatable(true)
+        .build();
+    let link_icon = gtk4::Image::from_icon_name("external-link-symbolic");
+    docs_row.add_suffix(&link_icon);
+    docs_row.connect_activated(|_| {
+        let _ = std::process::Command::new("xdg-open")
+            .arg("https://aistudio.google.com/app/apikey")
+            .spawn();
+    });
+    gemini_group.add(&docs_row);
+
+    api_key_row.connect_changed({
+        let config = Rc::clone(&config);
+        move |r| {
+            let v = r.text().to_string();
+            config.borrow_mut().ai.gemini_api_key = if v.is_empty() { None } else { Some(v) };
+            let _ = config.borrow().save();
+        }
+    });
 
     let model_row = libadwaita::ComboRow::builder()
         .title("Model")

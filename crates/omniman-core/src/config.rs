@@ -27,6 +27,9 @@ pub struct ClipboardConfig {
 #[serde(default)]
 pub struct AiConfig {
     pub model: String,
+    /// Gemini API key. Overridden by the GEMINI_API_KEY environment variable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_api_key: Option<String>,
     /// Base URL for an OpenAI-compatible endpoint (e.g. https://api.openai.com/v1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub openai_endpoint: Option<String>,
@@ -80,6 +83,7 @@ impl Default for AiConfig {
     fn default() -> Self {
         Self {
             model: "gemini-2.5-flash".into(),
+            gemini_api_key: None,
             openai_endpoint: None,
             openai_key: None,
             openai_model: "gpt-4o".into(),

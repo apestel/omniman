@@ -52,14 +52,19 @@ async fn main() -> anyhow::Result<()> {
     info!("clipboard watcher started");
 
     // ── Gemini client ─────────────────────────────────────────────────────────
-    let ai_client = match GeminiClient::from_env(&config.ai.model) {
-        Ok(c) => {
-            info!(model = %config.ai.model, "Gemini client ready");
-            Some(Arc::new(c))
-        }
-        Err(e) => {
-            tracing::warn!("AI unavailable: {e}");
-            None
+    let ai_client = {
+        let key = std::env::var("GEMINI_API_KEY")
+            .ok()
+            .or_else(|| config.ai.gemini_api_key.clone());
+        match key {
+            Some(k) => {
+                info!(model = %config.ai.model, "Gemini client ready");
+                Some(Arc::new(GeminiClient::new(k, config.ai.model.clone())))
+            }
+            None => {
+                tracing::warn!("AI unavailable: no GEMINI_API_KEY and no key in settings");
+                None
+            }
         }
     };
 

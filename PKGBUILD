@@ -4,12 +4,12 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Spotlight-like launcher with AI and clipboard history for Wayland/GNOME"
 arch=('x86_64')
-url="https://github.com/adrien/omniman"
+url="https://github.com/apestel/omniman"
 license=('MIT')
 depends=('gtk4' 'libadwaita' 'wl-clipboard' 'dbus' 'xdg-utils' 'glib2')
 makedepends=('rust' 'cargo')
 install=omniman.install
-source=("$pkgname-$pkgver.tar.gz::https://github.com/adrien/$pkgname/archive/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/apestel/$pkgname/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
