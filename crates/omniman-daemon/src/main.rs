@@ -13,6 +13,8 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    lower_priority();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -33,12 +35,12 @@ async fn main() -> anyhow::Result<()> {
     let home = home_dir();
     let home_clone = home.clone();
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = index_clone.crawl(&home_clone) {
-            tracing::error!("initial crawl failed: {e}");
+        if let Err(e) = index_clone.sweep(&home_clone) {
+            tracing::error!("startup sweep failed: {e}");
         }
     });
 
-    let _watcher = watcher::spawn(Arc::clone(&file_index), home, Config::data_dir())
+    let _watcher = watcher::spawn(Arc::clone(&file_index), home.clone(), Config::data_dir())
         .context("creating file watcher")?;
 
     // ── Clipboard ─────────────────────────────────────────────────────────────
@@ -66,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         index: Arc::clone(&file_index),
         clipboard: Arc::clone(&clip_store),
         ai: ai_client,
+        home: home.clone(),
     };
     let conn = zbus::connection::Builder::session()?
         .name(ipc::BUS_NAME)?
@@ -92,4 +95,22 @@ fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
+}
+
+/// Make the daemon nice and IO-idle so indexing/sweeping yields CPU and disk to
+/// the foreground.  Errors are swallowed — these calls can't usefully fail and
+/// we don't want to refuse to start if the kernel rejects the request.
+fn lower_priority() {
+    // nice(19) — lowest CPU priority.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+    }
+    // IOPRIO_CLASS_IDLE via the raw ioprio_set syscall (libc has no wrapper).
+    // who=IOPRIO_WHO_PROCESS(1), who_id=0 (= self), data=class<<13.
+    const IOPRIO_WHO_PROCESS: libc::c_int = 1;
+    const IOPRIO_CLASS_IDLE: libc::c_int = 3;
+    let prio = IOPRIO_CLASS_IDLE << 13;
+    unsafe {
+        libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, prio);
+    }
 }

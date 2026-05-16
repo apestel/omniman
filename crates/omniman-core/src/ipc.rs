@@ -22,6 +22,8 @@ pub trait Omniman {
 
     async fn request_show_ui(&self) -> zbus::Result<()>;
 
+    async fn reindex(&self) -> zbus::Result<()>;
+
     #[zbus(signal)]
     fn show_ui(&self) -> zbus::Result<()>;
 }

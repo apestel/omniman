@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use omniman_ai::GeminiClient;
 use omniman_clipboard::ClipboardStore;
@@ -10,6 +13,7 @@ pub struct OmnimanService {
     pub index: Arc<FileIndex>,
     pub clipboard: Arc<Mutex<ClipboardStore>>,
     pub ai: Option<Arc<GeminiClient>>,
+    pub home: PathBuf,
 }
 
 #[interface(name = "org.adrien.Omniman1")]
@@ -59,6 +63,22 @@ impl OmnimanService {
         Self::show_ui(&emitter).await.map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
+    /// Force a full re-crawl of $HOME from scratch.  The normal startup pass is
+    /// an incremental mtime sweep; this method is the escape hatch when the user
+    /// suspects the index has drifted (e.g. after `rm -rf` while the daemon was off).
+    /// Runs on a blocking thread; returns immediately, completion logged to journald.
+    async fn reindex(&self) -> zbus::fdo::Result<()> {
+        tracing::info!("Reindex requested via D-Bus");
+        let index = Arc::clone(&self.index);
+        let home = self.home.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = index.crawl(&home) {
+                tracing::error!("manual reindex failed: {e}");
+            }
+        });
+        Ok(())
+    }
+
     #[zbus(signal)]
     pub async fn show_ui(emitter: &zbus::object_server::SignalEmitter<'_>) -> zbus::Result<()>;
 }
@@ -80,7 +100,12 @@ mod tests {
         let clipboard = Arc::new(Mutex::new(
             omniman_clipboard::ClipboardStore::open(&tmp.path().join("clip.db")).unwrap(),
         ));
-        OmnimanService { index, clipboard, ai: None }
+        OmnimanService {
+            index,
+            clipboard,
+            ai: None,
+            home: tmp.path().to_path_buf(),
+        }
     }
 
     #[tokio::test]
