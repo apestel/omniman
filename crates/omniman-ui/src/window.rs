@@ -169,10 +169,31 @@ pub fn build(
         .child(&ai_text_view)
         .build();
 
-    // Stack: loading | response
+    // Rate-limit state: centred message + countdown + progress bar
+    let rl_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    rl_box.set_valign(gtk4::Align::Center);
+    rl_box.set_vexpand(true);
+    let rl_title = gtk4::Label::builder()
+        .label("Rate limited — quota exceeded")
+        .css_classes(["omniman-placeholder"])
+        .halign(gtk4::Align::Center)
+        .build();
+    let rl_countdown = gtk4::Label::builder()
+        .label("")
+        .halign(gtk4::Align::Center)
+        .build();
+    let rl_bar = gtk4::ProgressBar::new();
+    rl_bar.set_margin_start(32);
+    rl_bar.set_margin_end(32);
+    rl_box.append(&rl_title);
+    rl_box.append(&rl_countdown);
+    rl_box.append(&rl_bar);
+
+    // Stack: loading | response | rate-limit
     let ai_stack = gtk4::Stack::new();
     ai_stack.add_named(&spinner_box, Some("loading"));
     ai_stack.add_named(&ai_scroll, Some("response"));
+    ai_stack.add_named(&rl_box, Some("rate-limit"));
     ai_stack.set_visible_child_name("response");
     ai_panel.append(&ai_stack);
 
@@ -476,11 +497,18 @@ pub fn build(
         let ai_buffer = ai_buffer.clone();
         let ai_stack = ai_stack.clone();
         let spinner = spinner.clone();
+        let rl_countdown = rl_countdown.clone();
+        let rl_bar = rl_bar.clone();
         async move {
             let mut accumulated = String::new();
+            // Holds a running rate-limit countdown; cancelled on the next Start.
+            let countdown_timer: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
             while let Ok(msg) = ai_result_rx.recv().await {
                 match msg {
                     AiMsg::Start => {
+                        if let Some(id) = countdown_timer.take() {
+                            id.remove();
+                        }
                         accumulated.clear();
                         ai_buffer.set_text("");
                         spinner.start();
@@ -507,6 +535,28 @@ pub fn build(
                         // render_markdown clears and rewrites the buffer in one shot,
                         // which is fine now that all text has already been animated in.
                         render_markdown(&ai_buffer, &accumulated);
+                    }
+                    AiMsg::RateLimit(total_secs) => {
+                        spinner.stop();
+                        rl_countdown.set_label(&format_countdown(total_secs));
+                        rl_bar.set_fraction(0.0);
+                        ai_stack.set_visible_child_name("rate-limit");
+                        let remaining = Rc::new(Cell::new(total_secs));
+                        let label = rl_countdown.clone();
+                        let bar = rl_bar.clone();
+                        let id = glib::timeout_add_local(Duration::from_secs(1), move || {
+                            let r = remaining.get().saturating_sub(1);
+                            remaining.set(r);
+                            bar.set_fraction((total_secs - r) as f64 / total_secs as f64);
+                            if r == 0 {
+                                label.set_label("Ready — you can ask again.");
+                                glib::ControlFlow::Break
+                            } else {
+                                label.set_label(&format_countdown(r));
+                                glib::ControlFlow::Continue
+                            }
+                        });
+                        countdown_timer.set(Some(id));
                     }
                 }
             }
@@ -787,6 +837,16 @@ fn setup_text_tags(buffer: &gtk4::TextBuffer) {
     table.add(&code_block);
     table.add(&bullet);
     table.add(&blockquote);
+}
+
+fn format_countdown(secs: u64) -> String {
+    let m = secs / 60;
+    let s = secs % 60;
+    if m > 0 {
+        format!("Retry in {m}m {s:02}s")
+    } else {
+        format!("Retry in {s}s")
+    }
 }
 
 fn load_css() {

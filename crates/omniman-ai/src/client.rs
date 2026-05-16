@@ -4,6 +4,46 @@ use reqwest::Client;
 use serde::Deserialize;
 use tracing::debug;
 
+#[derive(Debug, thiserror::Error)]
+#[error("rate limited: retry after {retry_after_secs}s")]
+pub struct RateLimitError {
+    pub retry_after_secs: u64,
+}
+
+/// Extract the retry delay in seconds from a Gemini 429 JSON body.
+/// Reads `google.rpc.RetryInfo.retryDelay`; falls back to parsing the
+/// message text; defaults to 60s if neither is found.
+pub fn parse_retry_secs(body: &str) -> u64 {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(details) = v["error"]["details"].as_array() {
+            for d in details {
+                if d["@type"].as_str()
+                    == Some("type.googleapis.com/google.rpc.RetryInfo")
+                {
+                    if let Some(s) = d["retryDelay"]
+                        .as_str()
+                        .and_then(|s| s.trim_end_matches('s').parse::<f64>().ok())
+                    {
+                        return s.ceil() as u64;
+                    }
+                }
+            }
+        }
+        if let Some(msg) = v["error"]["message"].as_str() {
+            if let Some(secs) = parse_retry_from_message(msg) {
+                return secs;
+            }
+        }
+    }
+    parse_retry_from_message(body).unwrap_or(60)
+}
+
+fn parse_retry_from_message(msg: &str) -> Option<u64> {
+    let rest = msg.split("Please retry in ").nth(1)?;
+    let end = rest.find('s')?;
+    rest[..end].trim().parse::<f64>().ok().map(|s| s.ceil() as u64)
+}
+
 pub struct ModelInfo {
     pub id: String,
     pub display_name: String,
@@ -119,6 +159,9 @@ impl GeminiClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err(RateLimitError { retry_after_secs: parse_retry_secs(&text) }.into());
+            }
             anyhow::bail!("Gemini API {status}: {text}");
         }
 
@@ -177,6 +220,9 @@ impl GeminiClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err(RateLimitError { retry_after_secs: parse_retry_secs(&text) }.into());
+            }
             anyhow::bail!("Gemini API {status}: {text}");
         }
 

@@ -14,6 +14,8 @@ pub enum AiMsg {
     Start,
     Chunk(String),
     Done,
+    /// API rate-limited; UI should show a countdown for `secs` seconds.
+    RateLimit(u64),
 }
 
 fn main() -> glib::ExitCode {
@@ -190,7 +192,11 @@ async fn connect_and_serve(
                             }
                         });
                         if let Err(e) = ask(chunk_tx.clone()).await {
-                            let _ = result_tx.send(AiMsg::Chunk(format!("Error: {e}"))).await;
+                            if let Some(rl) = e.downcast_ref::<omniman_ai::RateLimitError>() {
+                                let _ = result_tx.send(AiMsg::RateLimit(rl.retry_after_secs)).await;
+                            } else {
+                                let _ = result_tx.send(AiMsg::Chunk(format!("Error: {e}"))).await;
+                            }
                         }
                         drop(chunk_tx);
                         let _ = forwarder.await;
@@ -211,7 +217,14 @@ async fn connect_and_serve(
                             .ask_ai(&prompt)
                             .await
                             .unwrap_or_else(|e| format!("D-Bus error: {e}"));
-                        let _ = result_tx.send(AiMsg::Chunk(resp)).await;
+                        // The daemon forwards Gemini errors as strings; detect 429.
+                        if resp.contains("429") {
+                            let json_start = resp.find('{').unwrap_or(resp.len());
+                            let secs = omniman_ai::parse_retry_secs(&resp[json_start..]);
+                            let _ = result_tx.send(AiMsg::RateLimit(secs)).await;
+                        } else {
+                            let _ = result_tx.send(AiMsg::Chunk(resp)).await;
+                        }
                     }
                     let _ = result_tx.send(AiMsg::Done).await;
                 });
