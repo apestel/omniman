@@ -9,7 +9,7 @@ Type=simple
 ExecStart=/usr/bin/omnimand
 Restart=on-failure
 RestartSec=5
-Environment=RUST_LOG=omnimand=info
+Environment=RUST_LOG=omnimand=info,omniman_clipboard=info
 # The daemon registers as org.adrien.OmnimanDaemon on the session bus.
 # The UI (omniman) registers as org.adrien.Omniman (GTK4 app ID).
 

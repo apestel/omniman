@@ -6,9 +6,9 @@ A Spotlight-like launcher for **Arch Linux + Wayland + GNOME**. Press `Ctrl+Spac
 
 ## Features
 
-- **File search** — full-text-aware search over `$HOME` via a live Tantivy index. Results appear in under 100 ms.
-- **Clipboard history** — persistent history of text, images, and file URIs. Press Enter to copy back to clipboard.
-- **AI assistant** — queries that look like questions are routed to Gemini (Google AI Studio). Streaming response rendered in the AI tab.
+- **File search** — fuzzy filename search over `$HOME` via a live Tantivy index with inotify-based incremental updates.
+- **Clipboard history** — persistent history of text and file URIs. Press Enter to copy back to clipboard.
+- **AI chat** — multi-turn conversations with Gemini or any OpenAI-compatible endpoint. Streaming responses with Markdown rendering. Conversations are persisted in SQLite.
 - **Native GNOME integration** — registered as a GNOME custom keybinding, no portal dance, works out of the box on Mutter ≥ 45.
 
 ## Requirements
@@ -20,12 +20,11 @@ A Spotlight-like launcher for **Arch Linux + Wayland + GNOME**. Press `Ctrl+Spac
 | libadwaita | 1.5 | `libadwaita` package |
 | GNOME / Mutter | 45 | Wayland session |
 | SQLite | 3 | `sqlite` package |
-| wl-clipboard | any | `wl-clipboard` package |
 | gdbus | any | Part of `glib2` |
 
 On Arch Linux:
 ```bash
-sudo pacman -S gtk4 libadwaita sqlite wl-clipboard
+sudo pacman -S gtk4 libadwaita sqlite dbus xdg-utils glib2
 ```
 
 ## Installation
@@ -56,10 +55,13 @@ systemctl --user enable --now omnimand
 
 # 3. Auto-start the UI at login
 cp /usr/share/applications/omniman.desktop ~/.config/autostart/
+# The UI stays resident in the background (hide-on-close).
+# To show the window immediately on launch, set OMNIMAN_SHOW=1 in the desktop entry.
 ```
 
-The daemon indexes `$HOME` on first start (background, non-blocking). Check
-progress:
+The daemon performs an incremental index sweep on every start (only new or
+modified files), so startup is fast. A full crawl can be triggered via the
+`Reindex` D-Bus method. Check progress:
 ```bash
 journalctl --user -u omnimand -f
 ```
@@ -85,20 +87,19 @@ systemctl --user enable --now omnimand
 # Register the global shortcut
 bash data/setup-shortcut.sh
 
-# Auto-start the UI at login
+# Auto-start the UI at login (stays resident, hide-on-close)
 cp data/omniman.desktop ~/.config/autostart/
 ```
 
-### Gemini API key (optional)
+### AI API key (optional)
 
 Without a key the Files and Clipboard tabs work fully; the AI tab is disabled.
 
-```bash
-# Store the key in the Secret Service (never written to disk in plaintext)
-secret-tool store --label "Omniman Gemini key" service omniman key gemini_api_key
-```
+You can use either **Gemini** (Google AI Studio) or any **OpenAI-compatible** endpoint.
 
-To pass the key to the daemon, create a drop-in override:
+#### Gemini
+
+Set the API key via environment variable:
 ```bash
 systemctl --user edit omnimand
 ```
@@ -109,6 +110,18 @@ Environment=GEMINI_API_KEY=your_key_here
 
 Or export `GEMINI_API_KEY` in your session environment (`~/.config/environment.d/`).
 
+Alternatively, set `gemini_api_key` directly in `~/.config/omniman/config.toml`.
+
+#### OpenAI-compatible endpoint
+
+Configure in `~/.config/omniman/config.toml`:
+```toml
+[ai]
+openai_endpoint = "https://api.openai.com/v1"
+openai_key = "your_key_here"
+openai_model = "gpt-4o"
+```
+
 ## Usage
 
 Press **`Ctrl+Space`** (or your configured shortcut) to open the launcher.
@@ -116,20 +129,23 @@ Press **`Ctrl+Space`** (or your configured shortcut) to open the launcher.
 | Key | Action |
 |---|---|
 | Type | Search files (debounced, 200 ms) |
-| `Enter` | Open selected file / copy clipboard entry |
+| `Enter` (search entry) | Send query as AI chat message |
+| `Enter` (file row) | Open selected file with `xdg-open` |
+| `Enter` (clipboard row) | Copy entry back to clipboard via `wl-copy` |
 | `↓` | Move focus to results list |
 | `Ctrl+Tab` | Cycle tabs: Files → Clipboard → AI |
-| `Ctrl+Enter` | Ask AI with the current query |
 | `Ctrl+L` | Jump back to search field |
 | `Escape` | Hide the launcher |
 
+The window also hides automatically 150 ms after losing focus.
+
 ### Tabs
 
-**Files** — searches filenames in `$HOME`. Selecting a result opens it with `xdg-open`.
+**Files** — fuzzy search over filenames in `$HOME`. Selecting a result opens it with `xdg-open`.
 
-**Clipboard** — shows the last 50 clipboard entries. Selecting one runs `wl-copy` to put it back on the clipboard.
+**Clipboard** — shows recent clipboard entries. Selecting one runs `wl-copy` to put it back on the clipboard.
 
-**AI** — appears automatically when the query looks like a question (`?` suffix, starts with `how`/`what`/`why`/`comment`/`quoi`/`qui`, or is longer than 5 words). Click **Ask AI** or press `Ctrl+Enter` to submit. The response streams into the panel with basic Markdown rendering.
+**AI** — appears when the query looks like a question (`?` suffix, >5 words, or starts with an interrogative word such as `how`, `what`, `why`, `comment`, `quoi`, `qui`, etc.). Click **Ask AI** or press Enter in the search entry to start a multi-turn conversation. Responses stream with Markdown rendering. Conversations are persisted and accessible from a sidebar. Supports both Gemini and OpenAI-compatible endpoints.
 
 ## Configuration
 
@@ -147,6 +163,13 @@ history_limit = 500
 [ai]
 # Gemini model to use
 model = "gemini-2.5-flash"
+# Gemini API key (or set GEMINI_API_KEY environment variable)
+# gemini_api_key = "your_key_here"
+
+# OpenAI-compatible endpoint (alternative to Gemini)
+# openai_endpoint = "https://api.openai.com/v1"
+# openai_key = "your_key_here"
+# openai_model = "gpt-4o"
 
 [hotkey]
 # Informational only — the actual shortcut lives in gsettings (setup-shortcut.sh)
@@ -156,6 +179,7 @@ shortcut = "Ctrl+Space"
 Data directory: `~/.local/share/omniman/`
 - `index/` — Tantivy search index
 - `clipboard.db` — clipboard history (SQLite)
+- `chat.db` — AI conversation history (SQLite)
 
 ## Architecture
 
@@ -174,8 +198,10 @@ omnimand  ──── D-Bus session bus ────  omniman (GTK4 UI)
 
 Two processes communicate over D-Bus (`org.adrien.OmnimanDaemon`):
 
-- **`omnimand`** — indexes files, watches clipboard, answers D-Bus method calls, emits `ShowUi`.
+- **`omnimand`** — indexes files, watches clipboard, answers D-Bus method calls, emits `ShowUi` and `ClipboardChanged` signals. Exposes methods: `Search`, `ClipboardHistory`, `AskAI`, `RequestShowUi`, `ListModels`, `Reindex`.
 - **`omniman`** — renders results, hides/shows on demand, stays alive with `hide-on-close`.
+
+The daemon also supports D-Bus auto-activation via `org.adrien.OmnimanDaemon.service`.
 
 ## Development
 
@@ -194,6 +220,12 @@ gdbus call --session \
 
 # Tests
 cargo test --workspace
+
+# Force full re-index (without deleting index dir)
+gdbus call --session \
+  --dest org.adrien.OmnimanDaemon \
+  --object-path /org/adrien/Omniman \
+  --method org.adrien.Omniman1.Reindex
 
 # Reset index (forces full re-crawl on next daemon start)
 rm -rf ~/.local/share/omniman/index/
