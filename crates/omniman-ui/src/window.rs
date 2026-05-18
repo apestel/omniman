@@ -158,7 +158,7 @@ pub fn build(
         .build();
 
     let new_chat_btn = gtk4::Button::builder()
-        .label("＋ New chat")
+        .label("+ New chat")
         .css_classes(["omniman-newchat-btn", "flat"])
         .build();
 
@@ -177,14 +177,6 @@ pub fn build(
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .child(&thread_box)
         .build();
-
-    // Auto-scroll to bottom when content grows
-    {
-        let adj = thread_scroll.vadjustment();
-        adj.connect_notify_local(Some("upper"), |a, _| {
-            a.set_value(a.upper() - a.page_size());
-        });
-    }
 
     // — Input row —
     let input_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
@@ -228,13 +220,55 @@ pub fn build(
     // ── State ─────────────────────────────────────────────────────────────────
     // current_conv_id: None = next user turn creates a new conversation
     let current_conv_id: Rc<Cell<Option<i64>>> = Rc::new(Cell::new(None));
-    // in-flight streaming buffer for the assistant turn
-    let pending_buffer: Rc<RefCell<Option<gtk4::TextBuffer>>> = Rc::new(RefCell::new(None));
+    // in-flight streaming state: buffer + optional typing-dots widget
+    let pending_assistant: Rc<RefCell<Option<(gtk4::TextBuffer, Option<gtk4::Box>)>>> =
+        Rc::new(RefCell::new(None));
     // true while a request is in flight (prevents double-sends)
     let streaming: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     // holds the title placeholder for the current new conversation
     let new_conv_title_row: Rc<RefCell<Option<(i64, libadwaita::ActionRow)>>> =
         Rc::new(RefCell::new(None));
+
+    // ── Sticky-bottom scroll state ───────────────────────────────────────────
+    // True when the user is parked at the bottom and wants new content to
+    // follow. Flips false the moment the user scrolls up.
+    let at_bottom: Rc<Cell<bool>> = Rc::new(Cell::new(true));
+    // Set while we perform a programmatic scroll so the value-changed handler
+    // doesn't misread it as user intent.
+    let scroll_lock: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
+    let scroll_to_bottom: Rc<dyn Fn()> = {
+        let scroll = thread_scroll.clone();
+        let lock = Rc::clone(&scroll_lock);
+        let at_bottom = Rc::clone(&at_bottom);
+        Rc::new(move || {
+            let adj = scroll.vadjustment();
+            if adj.page_size() <= 0.0 { return; }
+            lock.set(true);
+            adj.set_value(adj.upper() - adj.page_size());
+            lock.set(false);
+            at_bottom.set(true);
+        })
+    };
+
+    {
+        let adj = thread_scroll.vadjustment();
+        adj.connect_value_changed({
+            let at_bottom = Rc::clone(&at_bottom);
+            let lock = Rc::clone(&scroll_lock);
+            move |a| {
+                if lock.get() { return; }
+                let bottom = (a.upper() - a.page_size()).max(0.0);
+                at_bottom.set(bottom < 1.0 || (bottom - a.value()).abs() < 1.0);
+            }
+        });
+        // Follow growing content during streaming (sticky-bottom).
+        adj.connect_notify_local(Some("upper"), {
+            let scroll_to_bottom = Rc::clone(&scroll_to_bottom);
+            let at_bottom = Rc::clone(&at_bottom);
+            move |_, _| { if at_bottom.get() { scroll_to_bottom(); } }
+        });
+    }
 
     // ── Load existing conversations into sidebar ───────────────────────────────
     {
@@ -269,7 +303,7 @@ pub fn build(
         let chat_req_tx = chat_req_tx.clone();
         let chat_store = Rc::clone(&chat_store);
         let current_conv_id = Rc::clone(&current_conv_id);
-        let pending_buffer = Rc::clone(&pending_buffer);
+        let pending_assistant = Rc::clone(&pending_assistant);
         let streaming = Rc::clone(&streaming);
         let thread_box = thread_box.clone();
         let conv_list = conv_list.clone();
@@ -330,11 +364,12 @@ pub fn build(
             // Render user bubble
             append_user_bubble(&thread_box, &text);
 
-            // Create empty assistant bubble with a new buffer
+            // Create empty assistant bubble with typing-dots indicator
             let buf = gtk4::TextBuffer::new(None);
             setup_text_tags(&buf);
-            append_assistant_bubble(&thread_box, &buf);
-            *pending_buffer.borrow_mut() = Some(buf);
+            let dots = append_assistant_bubble(&thread_box, &buf);
+            *pending_assistant.borrow_mut() = Some((buf, Some(dots)));
+            // Scroll follow is handled by the notify::upper handler when sticky.
 
             if let Err(e) = chat_req_tx.try_send(ChatReq::NewTurn { conv_id, history }) {
                 tracing::warn!(conv_id, "chat_req channel full, dropping NewTurn: {e}");
@@ -474,12 +509,18 @@ pub fn build(
         let chat_store = Rc::clone(&chat_store);
         let current_conv_id = Rc::clone(&current_conv_id);
         let thread_box = thread_box.clone();
+        let thread_scroll = thread_scroll.clone();
         let chat_entry = chat_entry.clone();
         let btn_ai = btn_ai.clone();
         let stack = stack.clone();
+        let at_bottom = Rc::clone(&at_bottom);
+        let scroll_to_bottom = Rc::clone(&scroll_to_bottom);
         move |_, row| {
             let conv_id = conv_id_from_row(row);
             current_conv_id.set(Some(conv_id));
+            // Reset offset and force sticky mode for the new conversation.
+            thread_scroll.vadjustment().set_value(0.0);
+            at_bottom.set(true);
             clear_thread(&thread_box);
             let msgs = chat_store.borrow().messages(conv_id).unwrap_or_default();
             for msg in &msgs {
@@ -489,12 +530,33 @@ pub fn build(
                     let buf = gtk4::TextBuffer::new(None);
                     setup_text_tags(&buf);
                     render_markdown(&buf, &msg.content);
-                    append_assistant_bubble(&thread_box, &buf);
+                    let dots = append_assistant_bubble(&thread_box, &buf);
+                    dots.unparent();
                 }
             }
             btn_ai.set_active(true);
             stack.set_visible_child_name("ai");
             chat_entry.grab_focus();
+            // Tick callbacks fire at the *end* of each rendered frame, when
+            // GTK has finished measuring & allocating everything for that
+            // frame. Wrapped TextViews need a couple of frames to converge,
+            // so we re-pin to the bottom for the first ~3 frames after a
+            // conversation load, then disconnect.
+            let remaining: Rc<Cell<u32>> = Rc::new(Cell::new(3));
+            thread_box.add_tick_callback({
+                let scroll_to_bottom = Rc::clone(&scroll_to_bottom);
+                let remaining = Rc::clone(&remaining);
+                move |_, _| {
+                    scroll_to_bottom();
+                    let n = remaining.get();
+                    if n <= 1 {
+                        glib::ControlFlow::Break
+                    } else {
+                        remaining.set(n - 1);
+                        glib::ControlFlow::Continue
+                    }
+                }
+            });
         }
     });
 
@@ -623,7 +685,7 @@ pub fn build(
 
     // ── Receive chat messages ─────────────────────────────────────────────────
     glib::spawn_future_local({
-        let pending_buffer = Rc::clone(&pending_buffer);
+        let pending_assistant = Rc::clone(&pending_assistant);
         let streaming = Rc::clone(&streaming);
         let chat_store = Rc::clone(&chat_store);
         let chat_req_tx = chat_req_tx.clone();
@@ -638,17 +700,30 @@ pub fn build(
                         if let Some(id) = countdown_timer.take() { id.remove(); }
                     }
                     ChatMsg::Chunk { text, .. } => {
-                        if let Some(buf) = pending_buffer.borrow().as_ref() {
+                        if let Some((_, dots_opt)) = pending_assistant.borrow_mut().as_mut() {
+                            if let Some(dots) = dots_opt.take() {
+                                dots.unparent();
+                            }
+                        }
+                        if let Some((buf, _)) = pending_assistant.borrow().as_ref() {
                             animate_into(buf, &text).await;
                         }
+                        // notify::upper handler auto-scrolls when at_bottom.
                     }
                     ChatMsg::Done { conv_id, full_text } => {
                         tracing::debug!(conv_id, chars = full_text.len(), "Done received");
-                        // Apply markdown rendering
-                        if let Some(buf) = pending_buffer.borrow().as_ref() {
+                        // Remove any remaining typing-dots then apply markdown rendering
+                        if let Some((_, dots_opt)) = pending_assistant.borrow_mut().as_mut() {
+                            if let Some(dots) = dots_opt.take() {
+                                dots.unparent();
+                            }
+                        }
+                        if let Some((buf, _)) = pending_assistant.borrow().as_ref() {
                             render_markdown(buf, &full_text);
                         }
-                        *pending_buffer.borrow_mut() = None;
+                        *pending_assistant.borrow_mut() = None;
+                        // thread_box.size_allocate fires after the re-render's
+                        // layout pass and pins to the true bottom if at_bottom.
 
                         // Persist assistant message
                         if let Err(e) = chat_store.borrow().append_message(conv_id, "assistant", &full_text) {
@@ -673,27 +748,23 @@ pub fn build(
                         }
                     }
                     ChatMsg::RateLimit { conv_id: _, secs } => {
-                        // Replace pending buffer content with rate-limit message
-                        if let Some(buf) = pending_buffer.borrow().as_ref() {
+                        // Remove typing-dots and replace with rate-limit message
+                        if let Some((_, dots_opt)) = pending_assistant.borrow_mut().as_mut() {
+                            if let Some(dots) = dots_opt.take() {
+                                dots.unparent();
+                            }
+                        }
+                        if let Some((buf, _)) = pending_assistant.borrow().as_ref() {
                             buf.set_text(&format!("Rate limited — retry in {secs}s"));
                         }
-                        *pending_buffer.borrow_mut() = None;
+                        *pending_assistant.borrow_mut() = None;
                         streaming.set(false);
 
                         let remaining = Rc::new(Cell::new(secs));
-                        let id = glib::timeout_add_local(Duration::from_secs(1), {
-                            let pending_buffer = Rc::clone(&pending_buffer);
-                            move || {
-                                let r = remaining.get().saturating_sub(1);
-                                remaining.set(r);
-                                if r == 0 {
-                                    glib::ControlFlow::Break
-                                } else {
-                                    // No buffer to update (already None), just tick
-                                    let _ = (pending_buffer.borrow(), r);
-                                    glib::ControlFlow::Continue
-                                }
-                            }
+                        let id = glib::timeout_add_local(Duration::from_secs(1), move || {
+                            let r = remaining.get().saturating_sub(1);
+                            remaining.set(r);
+                            if r == 0 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
                         });
                         countdown_timer.set(Some(id));
                     }
@@ -856,10 +927,20 @@ fn append_user_bubble(thread_box: &gtk4::Box, text: &str) {
     thread_box.append(&bubble);
 }
 
-fn append_assistant_bubble(thread_box: &gtk4::Box, buffer: &gtk4::TextBuffer) {
+fn append_assistant_bubble(thread_box: &gtk4::Box, buffer: &gtk4::TextBuffer) -> gtk4::Box {
     let bubble = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     bubble.add_css_class("omniman-bubble-assistant");
     bubble.set_hexpand(true);
+
+    let dots = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    for extra_class in [None, Some("d2"), Some("d3")] {
+        let lbl = gtk4::Label::new(Some("●"));
+        let mut classes = vec!["omniman-typing-dot"];
+        if let Some(c) = extra_class { classes.push(c); }
+        lbl.set_css_classes(&classes);
+        dots.append(&lbl);
+    }
+    bubble.append(&dots);
 
     let text_view = gtk4::TextView::builder()
         .buffer(buffer)
@@ -876,6 +957,7 @@ fn append_assistant_bubble(thread_box: &gtk4::Box, buffer: &gtk4::TextBuffer) {
 
     bubble.append(&text_view);
     thread_box.append(&bubble);
+    dots
 }
 
 async fn animate_into(buffer: &gtk4::TextBuffer, chunk: &str) {
