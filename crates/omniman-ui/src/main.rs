@@ -72,7 +72,10 @@ fn main() -> glib::ExitCode {
         .build();
 
     app.connect_activate(move |app| {
-        let rx = result_rx.lock().unwrap().take().expect("activate once");
+        let rx = match result_rx.lock().unwrap().take() {
+            Some(rx) => rx,
+            None => return,
+        };
         let srx = show_rx.lock().unwrap().take().expect("activate once");
         let crx = clip_result_rx.lock().unwrap().take().expect("activate once");
         let cmrx = chat_msg_rx.lock().unwrap().take().expect("activate once");
