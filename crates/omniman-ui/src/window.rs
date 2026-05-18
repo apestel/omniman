@@ -1,4 +1,4 @@
-use std::{cell::{Cell, RefCell}, rc::Rc, time::Duration};
+use std::{cell::{Cell, RefCell}, rc::Rc, sync::Arc, time::Duration};
 
 use gtk4::{gdk, glib, prelude::*};
 use libadwaita::prelude::*;
@@ -39,21 +39,47 @@ pub fn build(
         .hide_on_close(true)
         .build();
 
-    // ── Clipboard monitor (GTK4 API, uses data-device, works on Mutter) ──────
+    // ── Clipboard monitor (instant, via clipboard-changed signal) ──────────────
     {
         let clipboard = window.clipboard();
         let tx = clip_content_tx.clone();
-        glib::spawn_future_local(async move {
-            let mut last = String::new();
-            loop {
-                glib::timeout_future(Duration::from_secs(3)).await;
+        let last = Arc::new(std::sync::Mutex::new(String::new()));
+
+        // Initial read on startup
+        {
+            let clipboard = clipboard.clone();
+            let tx = tx.clone();
+            let last = Arc::clone(&last);
+            glib::spawn_future_local(async move {
                 if let Ok(Some(content)) = clipboard.read_text_future().await {
                     let s = content.to_string();
-                    if !s.trim().is_empty() && s != last {
-                        last = s.clone();
+                    if !s.trim().is_empty() {
+                        *last.lock().unwrap() = s.clone();
                         let _ = tx.send(s).await;
                     }
                 }
+            });
+        }
+
+        // Instant notification on external clipboard changes
+        clipboard.connect_changed({
+            let clipboard = clipboard.clone();
+            let tx = tx.clone();
+            let last = Arc::clone(&last);
+            move |_clipboard| {
+                let clipboard = clipboard.clone();
+                let tx = tx.clone();
+                let last = Arc::clone(&last);
+                glib::spawn_future_local(async move {
+                    if let Ok(Some(content)) = clipboard.read_text_future().await {
+                        let s = content.to_string();
+                        let prev = last.lock().unwrap().clone();
+                        if !s.trim().is_empty() && s != prev {
+                            *last.lock().unwrap() = s.clone();
+                            let _ = tx.send(s).await;
+                        }
+                    }
+                });
             }
         });
     }
