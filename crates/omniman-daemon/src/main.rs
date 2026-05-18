@@ -48,8 +48,6 @@ async fn main() -> anyhow::Result<()> {
     let clip_store = Arc::new(Mutex::new(
         ClipboardStore::open(&clip_db).context("opening clipboard store")?,
     ));
-    let (_clip_watcher, mut clip_changed_rx) = omniman_clipboard::spawn_watcher(Arc::clone(&clip_store));
-    info!("clipboard watcher started");
 
     // ── Gemini client ─────────────────────────────────────────────────────────
     let ai_client = {
@@ -87,20 +85,6 @@ async fn main() -> anyhow::Result<()> {
         object_path = ipc::OBJECT_PATH,
         "D-Bus service running"
     );
-
-    // Emit ClipboardChanged signal whenever the watcher stores a new entry.
-    let conn_for_clip = conn.clone();
-    tokio::spawn(async move {
-        while clip_changed_rx.changed().await.is_ok() {
-            if let Ok(iface) = conn_for_clip
-                .object_server()
-                .interface::<_, OmnimanService>(ipc::OBJECT_PATH)
-                .await
-            {
-                OmnimanService::clipboard_changed(iface.signal_emitter()).await.ok();
-            }
-        }
-    });
 
     // Global shortcut registration is handled by the UI process (omniman), which
     // has a Wayland connection that GNOME's portal requires.

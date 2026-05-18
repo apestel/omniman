@@ -96,6 +96,24 @@ impl OmnimanService {
         Ok(())
     }
 
+    async fn store_clip_entry(
+        &self,
+        kind: &str,
+        content: &str,
+        mime: &str,
+        #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let changed = if let Ok(store) = self.clipboard.lock() {
+            store.insert(kind, content, mime).unwrap_or(false)
+        } else {
+            false
+        };
+        if changed {
+            Self::clipboard_changed(&emitter).await.ok();
+        }
+        Ok(())
+    }
+
     #[zbus(signal)]
     pub async fn show_ui(emitter: &zbus::object_server::SignalEmitter<'_>) -> zbus::Result<()>;
 

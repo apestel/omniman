@@ -10,6 +10,28 @@ use wl_clipboard_rs::paste::{get_contents, ClipboardType, Error as PasteError, M
 
 use crate::store::ClipboardStore;
 
+/// Read the current clipboard text content via wl-clipboard-rs.
+/// Returns `None` if the clipboard is empty or unavailable.
+pub fn read_text() -> Option<String> {
+    match get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text) {
+        Ok((mut pipe, _mime)) => {
+            let mut buf = Vec::new();
+            if pipe.read_to_end(&mut buf).is_err() {
+                return None;
+            }
+            match String::from_utf8(buf) {
+                Ok(content) if !content.trim().is_empty() => Some(content),
+                _ => None,
+            }
+        }
+        Err(PasteError::NoSeats | PasteError::ClipboardEmpty | PasteError::NoMimeType) => None,
+        Err(e) => {
+            warn!("clipboard read error: {e}");
+            None
+        }
+    }
+}
+
 /// Spawn a background thread that polls the Wayland clipboard for changes
 /// using `wl-clipboard-rs` (no external binary required).
 ///

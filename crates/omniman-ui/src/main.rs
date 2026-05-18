@@ -45,6 +45,9 @@ fn main() -> glib::ExitCode {
     let (chat_req_tx, chat_req_rx) = async_channel::bounded::<ChatReq>(4);
     let (chat_msg_tx, chat_msg_rx) = async_channel::bounded::<ChatMsg>(128);
 
+    let (clip_content_tx, clip_content_rx) = async_channel::bounded::<String>(8);
+    let clip_content_rx = Arc::new(std::sync::Mutex::new(Some(clip_content_rx)));
+
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(dbus_worker(
@@ -55,6 +58,7 @@ fn main() -> glib::ExitCode {
             clip_result_tx,
             chat_req_rx,
             chat_msg_tx,
+            clip_content_rx,
         ));
     });
 
@@ -81,6 +85,7 @@ fn main() -> glib::ExitCode {
             crx,
             chat_req_tx.clone(),
             cmrx,
+            clip_content_tx.clone(),
         );
     });
 
@@ -95,7 +100,9 @@ async fn dbus_worker(
     clip_result_tx: async_channel::Sender<Vec<ClipEntry>>,
     chat_req_rx: async_channel::Receiver<ChatReq>,
     chat_msg_tx: async_channel::Sender<ChatMsg>,
+    clip_content_rx: Arc<std::sync::Mutex<Option<async_channel::Receiver<String>>>>,
 ) {
+    let clip_content_rx = clip_content_rx.lock().unwrap().take().expect("dbus_worker once");
     loop {
         match connect_and_serve(
             &query_rx,
@@ -105,6 +112,7 @@ async fn dbus_worker(
             &clip_result_tx,
             &chat_req_rx,
             &chat_msg_tx,
+            &clip_content_rx,
         )
         .await
         {
@@ -168,6 +176,7 @@ async fn connect_and_serve(
     clip_result_tx: &async_channel::Sender<Vec<ClipEntry>>,
     chat_req_rx: &async_channel::Receiver<ChatReq>,
     chat_msg_tx: &async_channel::Sender<ChatMsg>,
+    clip_content_rx: &async_channel::Receiver<String>,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     use futures_util::StreamExt;
@@ -204,6 +213,10 @@ async fn connect_and_serve(
             Some(_) = clip_changed_stream.next() => {
                 let entries = proxy.clipboard_history(50).await.unwrap_or_default();
                 if clip_result_tx.send(entries).await.is_err() { break; }
+            }
+            Ok(content) = clip_content_rx.recv() => {
+                let kind = if content.starts_with("file://") { "Uri" } else { "Text" };
+                let _ = proxy.store_clip_entry(&kind, &content, "text/plain").await;
             }
             Ok(req) = chat_req_rx.recv() => {
                 let config = omniman_core::config::Config::load().unwrap_or_default();

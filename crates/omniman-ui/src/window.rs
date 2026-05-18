@@ -19,6 +19,7 @@ pub fn build(
     clip_result_rx: async_channel::Receiver<Vec<ClipEntry>>,
     chat_req_tx: async_channel::Sender<ChatReq>,
     chat_msg_rx: async_channel::Receiver<ChatMsg>,
+    clip_content_tx: async_channel::Sender<String>,
 ) -> libadwaita::ApplicationWindow {
     load_css();
 
@@ -37,6 +38,25 @@ pub fn build(
         .css_classes(["omniman-launcher"])
         .hide_on_close(true)
         .build();
+
+    // ── Clipboard monitor (GTK4 API, uses data-device, works on Mutter) ──────
+    {
+        let clipboard = window.clipboard();
+        let tx = clip_content_tx.clone();
+        glib::spawn_future_local(async move {
+            let mut last = String::new();
+            loop {
+                glib::timeout_future(Duration::from_secs(3)).await;
+                if let Ok(Some(content)) = clipboard.read_text_future().await {
+                    let s = content.to_string();
+                    if !s.trim().is_empty() && s != last {
+                        last = s.clone();
+                        let _ = tx.send(s).await;
+                    }
+                }
+            }
+        });
+    }
 
     // ── Root layout ───────────────────────────────────────────────────────────
     let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);

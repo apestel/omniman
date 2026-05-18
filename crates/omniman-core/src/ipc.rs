@@ -28,6 +28,13 @@ pub trait Omniman {
 
     async fn reindex(&self) -> zbus::Result<()>;
 
+    async fn store_clip_entry(
+        &self,
+        kind: &str,
+        content: &str,
+        mime: &str,
+    ) -> zbus::Result<()>;
+
     #[zbus(signal)]
     fn show_ui(&self) -> zbus::Result<()>;
 
