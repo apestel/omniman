@@ -15,6 +15,7 @@ pub struct Hit {
     pub path: String,
     pub filename: String,
     pub score: f64,
+    pub snippet: String,
 }
 
 /// A clipboard entry kind.

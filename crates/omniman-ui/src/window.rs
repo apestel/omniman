@@ -761,12 +761,79 @@ pub fn build(
     files_list.connect_row_activated(|_, row| {
         if let Some(ar) = row.downcast_ref::<libadwaita::ActionRow>() {
             if let Some(path) = ar.subtitle() {
+                let path = path.split('\n').next().unwrap_or(path.as_str());
                 let _ = std::process::Command::new("xdg-open")
-                    .arg(path.as_str())
+                    .arg(path)
                     .spawn();
             }
         }
     });
+
+    // ── File row right-click context menu ────────────────────────────────────
+    {
+        let clipboard = window.clipboard();
+        let files_list_weak = files_list.downgrade();
+        let open_gesture = gtk4::GestureClick::new();
+        open_gesture.set_button(3);
+        open_gesture.connect_pressed(move |_gesture, _, _x, y| {
+            let Some(list) = files_list_weak.upgrade() else { return };
+            let Some(row) = list.row_at_y(y as i32) else { return };
+            let Some(ar) = row.downcast_ref::<libadwaita::ActionRow>() else { return };
+            let subtitle = match ar.subtitle() {
+                Some(s) => s.to_string(),
+                None => return,
+            };
+            let path = subtitle.split('\n').next().unwrap_or(&subtitle).to_string();
+
+            let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+            menu.set_margin_top(8);
+            menu.set_margin_bottom(8);
+            menu.set_margin_start(8);
+            menu.set_margin_end(8);
+
+            let open_btn = gtk4::Button::builder()
+                .label("Open")
+                .build();
+            let reveal_btn = gtk4::Button::builder()
+                .label("Reveal in folder")
+                .build();
+            let copy_btn = gtk4::Button::builder()
+                .label("Copy path")
+                .build();
+
+            let path_open = path.clone();
+            open_btn.connect_clicked(move |_| {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&path_open)
+                    .spawn();
+            });
+
+            let path_reveal = path.clone();
+            reveal_btn.connect_clicked(move |_| {
+                if let Some(parent) = std::path::Path::new(&path_reveal).parent() {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(parent)
+                        .spawn();
+                }
+            });
+
+            let path_copy = path.clone();
+            let cb = clipboard.clone();
+            copy_btn.connect_clicked(move |_| {
+                cb.set_text(&path_copy);
+            });
+
+            menu.append(&open_btn);
+            menu.append(&reveal_btn);
+            menu.append(&copy_btn);
+
+            let popover = gtk4::Popover::new();
+            popover.set_child(Some(&menu));
+            popover.set_parent(&row);
+            popover.popup();
+        });
+        files_list.add_controller(open_gesture);
+    }
 
     // ── Clipboard row activation → wl-copy ───────────────────────────────────
     let clipboard = window.clipboard();
@@ -788,9 +855,14 @@ pub fn build(
             while let Ok(hits) = result_rx.recv().await {
                 while let Some(child) = files_list.first_child() { files_list.remove(&child); }
                 for hit in &hits {
+                    let subtitle = if !hit.snippet.is_empty() {
+                        format!("{}\n{}", hit.path, &hit.snippet)
+                    } else {
+                        hit.path.clone()
+                    };
                     let row = libadwaita::ActionRow::builder()
                         .title(glib::markup_escape_text(&hit.filename))
-                        .subtitle(glib::markup_escape_text(&hit.path))
+                        .subtitle(glib::markup_escape_text(&subtitle))
                         .activatable(true)
                         .build();
                     let icon = gtk4::Image::from_icon_name(mime_icon(&hit.path));

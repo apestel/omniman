@@ -48,8 +48,9 @@ pub fn spawn(
     tokio::spawn(async move {
         // true = upsert, false = delete. HashMap deduplicates: last event for a path wins.
         let mut pending: HashMap<PathBuf, bool> = HashMap::new();
-        let mut flush_idle = Some(Box::pin(tokio::time::sleep(Duration::from_millis(200))));
-        let mut flush_hard: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+        let mut flush_idle = Box::pin(tokio::time::sleep(Duration::from_millis(200)));
+        let mut flush_hard = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
+        let mut hard_active = false;
 
         let do_flush = |batch: HashMap<PathBuf, bool>, index: Arc<FileIndex>| {
             tokio::task::spawn_blocking(move || {
@@ -103,21 +104,24 @@ pub fn spawn(
                             _ => {}
                         }
                     }
-                    flush_idle = Some(Box::pin(tokio::time::sleep(Duration::from_millis(200))));
-                    if flush_hard.is_none() {
-                        flush_hard = Some(Box::pin(tokio::time::sleep(Duration::from_secs(2))));
+                    flush_idle = Box::pin(tokio::time::sleep(Duration::from_millis(200)));
+                    if !hard_active {
+                        flush_hard = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
+                        hard_active = true;
                     }
                 }
-                _ = flush_idle.as_mut().unwrap(), if flush_idle.is_some() && !pending.is_empty() => {
-                    flush_idle = None;
-                    flush_hard = None;
+                _ = (&mut flush_idle), if !pending.is_empty() => {
+                    flush_idle = Box::pin(tokio::time::sleep(Duration::from_millis(200)));
+                    flush_hard = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
+                    hard_active = false;
                     let batch = std::mem::take(&mut pending);
                     let index = Arc::clone(&index);
                     do_flush(batch, index);
                 }
-                _ = flush_hard.as_mut().unwrap(), if flush_hard.is_some() && !pending.is_empty() => {
-                    flush_idle = None;
-                    flush_hard = None;
+                _ = (&mut flush_hard), if hard_active && !pending.is_empty() => {
+                    flush_idle = Box::pin(tokio::time::sleep(Duration::from_millis(200)));
+                    flush_hard = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
+                    hard_active = false;
                     let batch = std::mem::take(&mut pending);
                     let index = Arc::clone(&index);
                     do_flush(batch, index);

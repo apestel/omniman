@@ -70,6 +70,7 @@ fn build_index_page(win: &libadwaita::PreferencesWindow, config: Rc<RefCell<Conf
         .build();
     group.add(&row);
 
+    let config_for_excl = Rc::clone(&config);
     row.connect_changed(move |r| {
         let dirs: Vec<String> = r
             .text()
@@ -77,8 +78,52 @@ fn build_index_page(win: &libadwaita::PreferencesWindow, config: Rc<RefCell<Conf
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .collect();
-        config.borrow_mut().index.exclude_dirs = dirs;
-        let _ = config.borrow().save();
+        config_for_excl.borrow_mut().index.exclude_dirs = dirs;
+        let _ = config_for_excl.borrow().save();
+    });
+
+    // ── Content search ──────────────────────────────────────────────────────
+    let content_group = libadwaita::PreferencesGroup::builder()
+        .title("Content search")
+        .description("Index file contents for text and source code files. Restart omnimand to apply.")
+        .build();
+    page.add(&content_group);
+
+    let content_switch = libadwaita::ActionRow::builder()
+        .title("Index file contents")
+        .build();
+    let toggle = gtk4::Switch::builder()
+        .active(config.borrow().index.index_content)
+        .build();
+    content_switch.add_suffix(&toggle);
+    content_group.add(&content_switch);
+
+    toggle.connect_notify_local(Some("active"), {
+        let config = Rc::clone(&config);
+        move |sw: &gtk4::Switch, _| {
+            config.borrow_mut().index.index_content = sw.is_active();
+            let _ = config.borrow().save();
+        }
+    });
+
+    let size_adj = gtk4::Adjustment::new(
+        (config.borrow().index.max_content_size / 1024) as f64,
+        16.0,
+        10_240.0,
+        16.0,
+        100.0,
+        0.0,
+    );
+    let size_row = libadwaita::SpinRow::new(Some(&size_adj), 1.0, 0);
+    size_row.set_title("Max file size (KB)");
+    content_group.add(&size_row);
+
+    size_adj.connect_value_changed({
+        let config = Rc::clone(&config);
+        move |a| {
+            config.borrow_mut().index.max_content_size = (a.value() * 1024.0) as usize;
+            let _ = config.borrow().save();
+        }
     });
 }
 

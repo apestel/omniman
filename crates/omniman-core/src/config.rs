@@ -15,6 +15,10 @@ pub struct Config {
 pub struct IndexConfig {
     pub exclude_dirs: Vec<String>,
     pub max_depth: usize,
+    /// Index file contents for text/code files (default: true).
+    pub index_content: bool,
+    /// Maximum file size to read content from, in bytes (default: 1 MB).
+    pub max_content_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +75,8 @@ impl Default for IndexConfig {
                 ".cargo".into(),
             ],
             max_depth: 10,
+            index_content: true,
+            max_content_size: 1_048_576,
         }
     }
 }

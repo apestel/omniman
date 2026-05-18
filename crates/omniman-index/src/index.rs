@@ -35,8 +35,8 @@ pub struct FileIndex {
     reader: IndexReader,
     fields: Fields,
     excludes: HashSet<String>,
-    #[allow(dead_code)]
-    index_dir: PathBuf,
+    index_content: bool,
+    max_content_size: usize,
 }
 
 impl FileIndex {
@@ -58,12 +58,13 @@ impl FileIndex {
 
         let excludes = config.exclude_dirs.into_iter().collect();
 
-        Ok(Self {
+       Ok(Self {
             index,
             reader,
             fields,
             excludes,
-            index_dir: index_dir.to_owned(),
+            index_content: config.index_content,
+            max_content_size: config.max_content_size,
         })
     }
 
@@ -246,6 +247,7 @@ impl FileIndex {
         }
 
         let searcher = self.reader.searcher();
+        let query_str = query.to_string();
         let query = self.build_query(query);
 
         let top_docs = searcher
@@ -265,7 +267,12 @@ impl FileIndex {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            hits.push(Hit { path, filename, score: score as f64 });
+          let snippet = doc
+                .get_first(self.fields.content)
+                .and_then(|v| v.as_str())
+                .map(|s| truncate_snippet(s, &query_str, 120))
+                .unwrap_or_default();
+            hits.push(Hit { path, filename, score: score as f64, snippet });
         }
         Ok(hits)
     }
@@ -339,18 +346,32 @@ impl FileIndex {
         doc.add_text(self.fields.mime, &mime);
         doc.add_u64(self.fields.mtime, mtime);
         doc.add_u64(self.fields.size, size);
+
+        if self.index_content && is_indexable_mime(&mime) && (size as usize) <= self.max_content_size {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                doc.add_text(self.fields.content, &content);
+            }
+        }
+
         Some(doc)
     }
 
     fn build_query(&self, query: &str) -> Box<dyn Query> {
+        let edit_dist = if query.chars().count() <= 2 { 1 } else { 2 };
+
         let filename_fuzzy = FuzzyTermQuery::new(
             Term::from_field_text(self.fields.filename, query),
-            1,
+            edit_dist,
             true,
         );
         let parent_fuzzy = FuzzyTermQuery::new(
             Term::from_field_text(self.fields.parent, query),
-            1,
+            edit_dist,
+            true,
+        );
+        let content_fuzzy = FuzzyTermQuery::new(
+            Term::from_field_text(self.fields.content, query),
+            edit_dist,
             true,
         );
 
@@ -363,11 +384,13 @@ impl FileIndex {
                 (Occur::Should, Box::new(filename_fuzzy)),
                 (Occur::Should, Box::new(parent_fuzzy)),
                 (Occur::Should, Box::new(path_exact)),
+                (Occur::Should, Box::new(content_fuzzy)),
             ]))
         } else {
             Box::new(BooleanQuery::new(vec![
                 (Occur::Should, Box::new(filename_fuzzy)),
                 (Occur::Should, Box::new(parent_fuzzy)),
+                (Occur::Should, Box::new(content_fuzzy)),
             ]))
         }
     }
@@ -380,6 +403,63 @@ impl FileIndex {
             }
         }
         false
+    }
+}
+
+/// Returns true if the mime type is indexable for content search.
+fn is_indexable_mime(mime: &str) -> bool {
+    mime.starts_with("text/")
+        || mime == "application/json"
+        || mime == "application/xml"
+        || mime == "application/javascript"
+        || mime == "application/x-shellscript"
+        || mime == "application/toml"
+        || mime == "application/toml+toml"
+        || mime == "application/x-yaml"
+        || mime == "application/x-perl"
+        || mime == "application/x-ruby"
+        || mime == "application/x-httpd-php"
+        || mime == "application/x-httpd-php-source"
+}
+
+/// Extract a snippet centered on the first occurrence of `query` in `text`.
+/// Falls back to the first `max_len` characters if the query is not found.
+fn truncate_snippet(text: &str, query: &str, max_len: usize) -> String {
+    let lower = text.to_lowercase();
+    let q = query.to_lowercase();
+    if let Some(pos) = lower.find(&q) {
+        let start = pos.saturating_sub(40).min(text.char_indices().map(|(i, _)| i).last().unwrap_or(0));
+        let start_char = text
+            .char_indices()
+            .find(|(i, _)| *i == start)
+            .map(|(_, c)| c)
+            .unwrap_or(' ');
+        let start = if start_char == '\n' || start_char == ' ' || start_char == '\t' {
+            start
+        } else {
+            text.char_indices()
+                .rev()
+                .take_while(|(_, c)| !c.is_whitespace())
+                .skip_while(|(i, _)| *i >= start)
+                .find(|(_, c)| c.is_whitespace())
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        };
+        let end = (start + max_len).min(text.len());
+        let end = text[..end]
+            .rfind(' ')
+            .or(text[..end].rfind('\n'))
+            .unwrap_or(end);
+        let snippet = &text[start..end];
+        let prefix = if start > 0 { "…" } else { "" };
+        format!("{}{}", prefix, snippet.lines().next().unwrap_or(snippet))
+    } else {
+        let first_line = text.lines().next().unwrap_or(text);
+        if first_line.len() > max_len {
+            format!("…{}", &first_line[first_line.len() - max_len + 3..])
+        } else {
+            first_line.to_string()
+        }
     }
 }
 
@@ -407,6 +487,8 @@ mod tests {
         let config = IndexConfig {
             exclude_dirs: vec!["excluded".into(), "node_modules".into()],
             max_depth: 10,
+            index_content: true,
+            max_content_size: 1_048_576,
         };
         FileIndex::open(&tmp.path().join("idx"), config).unwrap()
     }
@@ -558,5 +640,68 @@ mod tests {
             "searching parent dir name should find files inside it"
         );
         assert_eq!(hits[0].filename, "report.txt");
+    }
+
+    #[test]
+    fn search_finds_file_by_content() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("readme.txt"), "This file contains the secret word: quux").unwrap();
+        std::fs::write(home.join("other.txt"), "Nothing interesting here").unwrap();
+
+        let idx = test_index(&tmp);
+        idx.crawl(&home, TEST_MAX_DEPTH).unwrap();
+        idx.reload().unwrap();
+
+        let hits = idx.search("secret", 10).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "searching content keyword should find readme.txt"
+        );
+        assert_eq!(hits[0].filename, "readme.txt");
+        assert!(!hits[0].snippet.is_empty(), "content match should have a snippet");
+    }
+
+    #[test]
+    fn search_fuzzy_distance_two() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("configuration.toml"), "[package]").unwrap();
+
+        let idx = test_index(&tmp);
+        idx.crawl(&home, TEST_MAX_DEPTH).unwrap();
+        idx.reload().unwrap();
+
+        let hits = idx.search("configuraion", 10).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "fuzzy distance 2 should find 'configuration' with typo 'configuraion'"
+        );
+    }
+
+    #[test]
+    fn content_search_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("readme.txt"), "This file contains the secret word: quux").unwrap();
+
+        let config = IndexConfig {
+            exclude_dirs: vec![],
+            max_depth: 10,
+            index_content: false,
+            max_content_size: 1_048_576,
+        };
+        let idx = FileIndex::open(&tmp.path().join("idx"), config).unwrap();
+        idx.crawl(&home, TEST_MAX_DEPTH).unwrap();
+        idx.reload().unwrap();
+
+        let hits = idx.search("secret", 10).unwrap();
+        assert!(
+            hits.is_empty(),
+            "content search should be disabled, no results for content keyword"
+        );
     }
 }

@@ -7,6 +7,7 @@ pub struct Fields {
     pub mtime: tantivy::schema::Field,
     pub size: tantivy::schema::Field,
     pub mime: tantivy::schema::Field,
+    pub content: tantivy::schema::Field,
 }
 
 pub fn build() -> (Schema, Fields) {
@@ -18,8 +19,9 @@ pub fn build() -> (Schema, Fields) {
     let mime = builder.add_text_field("mime", STRING | STORED);
     let mtime = builder.add_u64_field("mtime", INDEXED | FAST | STORED);
     let size = builder.add_u64_field("size", INDEXED | FAST | STORED);
+    let content = builder.add_text_field("content", TEXT | STORED);
 
     let schema = builder.build();
-    let fields = Fields { path, filename, parent, mtime, size, mime };
+    let fields = Fields { path, filename, parent, mtime, size, mime, content };
     (schema, fields)
 }
