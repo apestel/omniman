@@ -131,7 +131,7 @@ Press **`Ctrl+Space`** (or your configured shortcut) to open the launcher.
 | Type | Search files (debounced, 200 ms) |
 | `Enter` (search entry) | Send query as AI chat message |
 | `Enter` (file row) | Open selected file with `xdg-open` |
-| `Enter` (clipboard row) | Copy entry back to clipboard via `wl-copy` |
+| `Enter` (clipboard row) | Copy entry back to clipboard (GTK4 API) |
 | `↓` | Move focus to results list |
 | `Ctrl+Tab` | Cycle tabs: Files → Clipboard → AI |
 | `Ctrl+L` | Jump back to search field |
@@ -143,7 +143,7 @@ The window also hides automatically 150 ms after losing focus.
 
 **Files** — fuzzy search over filenames in `$HOME`. Selecting a result opens it with `xdg-open`.
 
-**Clipboard** — shows recent clipboard entries. Selecting one runs `wl-copy` to put it back on the clipboard.
+**Clipboard** — shows recent clipboard entries. Selecting one restores it via GTK4's clipboard API.
 
 **AI** — appears when the query looks like a question (`?` suffix, >5 words, or starts with an interrogative word such as `how`, `what`, `why`, `comment`, `quoi`, `qui`, etc.). Click **Ask AI** or press Enter in the search entry to start a multi-turn conversation. Responses stream with Markdown rendering. Conversations are persisted and accessible from a sidebar. Supports both Gemini and OpenAI-compatible endpoints.
 
@@ -198,7 +198,7 @@ omnimand  ──── D-Bus session bus ────  omniman (GTK4 UI)
 
 Two processes communicate over D-Bus (`org.adrien.OmnimanDaemon`):
 
-- **`omnimand`** — indexes files, watches clipboard, answers D-Bus method calls, emits `ShowUi` and `ClipboardChanged` signals. Exposes methods: `Search`, `ClipboardHistory`, `AskAI`, `RequestShowUi`, `ListModels`, `Reindex`.
+- **`omnimand`** — indexes files, owns clipboard SQLite store, answers D-Bus method calls, emits `ShowUi` and `ClipboardChanged` signals. Exposes methods: `Search`, `ClipboardHistory`, `StoreClipEntry`, `AskAI`, `RequestShowUi`, `ListModels`, `Reindex`.
 - **`omniman`** — renders results, hides/shows on demand, stays alive with `hide-on-close`.
 
 The daemon also supports D-Bus auto-activation via `org.adrien.OmnimanDaemon.service`.
