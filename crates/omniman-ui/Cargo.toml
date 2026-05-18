@@ -23,3 +23,4 @@ anyhow = { workspace = true }
 futures-util = "0.3"
 pulldown-cmark = { workspace = true }
 rusqlite = { workspace = true }
+wl-clipboard-rs = { workspace = true }
