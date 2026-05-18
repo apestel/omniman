@@ -1,4 +1,4 @@
-use crate::types::{ClipEntry, Hit, ModelEntry};
+use crate::types::{ChatTurn, ClipEntry, Hit, ModelEntry};
 use zbus::proxy;
 
 /// The daemon's well-known D-Bus service name.
@@ -18,7 +18,9 @@ pub trait Omniman {
 
     async fn clipboard_history(&self, limit: u32) -> zbus::Result<Vec<ClipEntry>>;
 
-    async fn ask_ai(&self, prompt: &str) -> zbus::Result<String>;
+    /// Start a streaming AI chat. Returns a session ID used to correlate
+    /// subsequent `chat_chunk`, `chat_done`, and `chat_error` signals.
+    async fn chat_streaming(&self, history: Vec<ChatTurn>) -> zbus::Result<u64>;
 
     async fn request_show_ui(&self) -> zbus::Result<()>;
 
@@ -40,4 +42,16 @@ pub trait Omniman {
 
     #[zbus(signal)]
     fn clipboard_changed(&self) -> zbus::Result<()>;
+
+    /// Streaming text chunk for an active chat session.
+    #[zbus(signal)]
+    fn chat_chunk(&self, session: u64, text: &str) -> zbus::Result<()>;
+
+    /// Final accumulated response for a completed chat session.
+    #[zbus(signal)]
+    fn chat_done(&self, session: u64, text: &str) -> zbus::Result<()>;
+
+    /// Error for a chat session (includes rate-limit and API errors).
+    #[zbus(signal)]
+    fn chat_error(&self, session: u64, msg: &str) -> zbus::Result<()>;
 }

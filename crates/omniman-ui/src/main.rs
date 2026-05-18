@@ -2,14 +2,13 @@ mod chat;
 mod prefs;
 mod window;
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use gtk4::glib;
 use gtk4::prelude::*;
-use omniman_ai::ChatTurn;
 use omniman_core::{
     ipc::OmnimanProxy,
-    types::{ClipEntry, Hit},
+    types::{ChatTurn, ClipEntry, Hit},
 };
 
 /// Request sent from UI → worker thread.
@@ -128,49 +127,6 @@ async fn dbus_worker(
     }
 }
 
-/// Stream turns through a client, forwarding chunks to the UI channel.
-/// Returns the accumulated full text.
-async fn do_stream<F, Fut>(
-    ask: F,
-    conv_id: i64,
-    msg_tx: &async_channel::Sender<ChatMsg>,
-) -> String
-where
-    F: FnOnce(async_channel::Sender<String>) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
-{
-    let (chunk_tx, chunk_rx) = async_channel::bounded::<String>(64);
-    let fwd_tx = msg_tx.clone();
-
-    // Accumulate + forward on a separate task so the client future can run
-    // concurrently with the forwarder.
-    let accumulator = tokio::spawn(async move {
-        let mut acc = String::new();
-        while let Ok(chunk) = chunk_rx.recv().await {
-            acc.push_str(&chunk);
-            let _ = fwd_tx.send(ChatMsg::Chunk { conv_id, text: chunk }).await;
-        }
-        acc
-    });
-
-    let result = ask(chunk_tx.clone()).await;
-    drop(chunk_tx); // signal accumulator that stream ended
-
-    let accumulated = accumulator.await.unwrap_or_default();
-
-    if let Err(e) = result {
-        if let Some(rl) = e.downcast_ref::<omniman_ai::RateLimitError>() {
-            let _ = msg_tx.send(ChatMsg::RateLimit { conv_id, secs: rl.retry_after_secs }).await;
-            return String::new();
-        }
-        let err_text = format!("Error: {e}");
-        let _ = msg_tx.send(ChatMsg::Chunk { conv_id, text: err_text.clone() }).await;
-        return err_text;
-    }
-
-    accumulated
-}
-
 async fn connect_and_serve(
     query_rx: &async_channel::Receiver<String>,
     result_tx: &async_channel::Sender<Vec<Hit>>,
@@ -199,6 +155,21 @@ async fn connect_and_serve(
         .receive_clipboard_changed()
         .await
         .context("subscribing ClipboardChanged")?;
+    let mut chat_chunk_stream = proxy
+        .receive_chat_chunk()
+        .await
+        .context("subscribing ChatChunk")?;
+    let mut chat_done_stream = proxy
+        .receive_chat_done()
+        .await
+        .context("subscribing ChatDone")?;
+    let mut chat_error_stream = proxy
+        .receive_chat_error()
+        .await
+        .context("subscribing ChatError")?;
+
+    // Maps session_id (from daemon) → conv_id (our internal ID)
+    let mut session_map: HashMap<u64, i64> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -222,110 +193,93 @@ async fn connect_and_serve(
                 let _ = proxy.store_clip_entry(&kind, &content, "text/plain").await;
             }
             Ok(req) = chat_req_rx.recv() => {
-                let config = omniman_core::config::Config::load().unwrap_or_default();
-                let oai: Option<Arc<omniman_ai::OpenAiClient>> =
-                    match (&config.ai.openai_endpoint, &config.ai.openai_key) {
-                        (Some(ep), Some(key)) if !ep.is_empty() && !key.is_empty() => Some(
-                            Arc::new(omniman_ai::OpenAiClient::new(
-                                key.clone(), ep.clone(), config.ai.openai_model.clone(),
-                            )),
-                        ),
-                        _ => None,
-                    };
-                let gem: Option<Arc<omniman_ai::GeminiClient>> = if oai.is_none() {
-                    omniman_ai::GeminiClient::from_env(&config.ai.model).ok().map(Arc::new)
-                } else {
-                    None
-                };
-
-                let msg_tx = chat_msg_tx.clone();
-                let proxy_clone = proxy.clone();
-
-                tokio::spawn(async move {
-                    match req {
-                        ChatReq::NewTurn { conv_id, history } => {
-                            tracing::debug!(
-                                conv_id,
-                                turns = history.len(),
-                                has_oai = oai.is_some(),
-                                has_gem = gem.is_some(),
-                                "NewTurn worker"
-                            );
-                            let _ = msg_tx.send(ChatMsg::Start { conv_id }).await;
-
-                            let full_text = if let Some(client) = oai {
-                                let h = history.clone();
-                                do_stream(
-                                    |tx| async move { client.chat_streaming(&h, &tx).await },
-                                    conv_id, &msg_tx,
-                                ).await
-                            } else if let Some(client) = gem {
-                                let h = history.clone();
-                                do_stream(
-                                    |tx| async move { client.chat_streaming(&h, &tx).await },
-                                    conv_id, &msg_tx,
-                                ).await
-                            } else {
-                                // D-Bus fallback: format full history as a single prompt
-                                // so the daemon at least has the conversation context.
-                                let prompt = history.iter().map(|t| {
-                                    let role = match t.role {
-                                        omniman_ai::ChatRole::User => "User",
-                                        omniman_ai::ChatRole::Assistant => "Assistant",
-                                    };
-                                    format!("{role}: {}", t.content)
-                                }).collect::<Vec<_>>().join("\n\n");
-                                tracing::debug!(conv_id, "D-Bus fallback, prompt turns = {}", history.len());
-                                let resp = proxy_clone
-                                    .ask_ai(&prompt)
-                                    .await
-                                    .unwrap_or_else(|e| format!("D-Bus error: {e}"));
-                                if resp.contains("429") {
-                                    let json_start = resp.find('{').unwrap_or(resp.len());
-                                    let secs = omniman_ai::parse_retry_secs(&resp[json_start..]);
-                                    let _ = msg_tx.send(ChatMsg::RateLimit { conv_id, secs }).await;
-                                    String::new()
-                                } else {
-                                    let _ = msg_tx.send(ChatMsg::Chunk { conv_id, text: resp.clone() }).await;
-                                    resp
-                                }
-                            };
-
-                            let _ = msg_tx.send(ChatMsg::Done { conv_id, full_text }).await;
-                        }
-
-                        ChatReq::Summarize { conv_id, user_msg, assistant_msg } => {
-                            let prompt = format!(
-                                "Summarize the topic of this exchange in 3 to 5 words.\n\
-                                 Return ONLY the title text — no quotes, no trailing punctuation.\n\n\
-                                 User: {user_msg}\nAssistant: {assistant_msg}"
-                            );
-                            let raw = if let Some(client) = oai {
-                                // collect streaming result for title
-                                let (tx, rx) = async_channel::bounded::<String>(64);
-                                let acc = tokio::spawn(async move {
-                                    let mut s = String::new();
-                                    while let Ok(c) = rx.recv().await { s.push_str(&c); }
-                                    s
-                                });
-                                let _ = client.chat_streaming(&[ChatTurn::user(&prompt)], &tx).await;
-                                drop(tx);
-                                acc.await.unwrap_or_default()
-                            } else if let Some(client) = gem {
-                                client.chat(&[ChatTurn::user(&prompt)]).await.unwrap_or_default()
-                            } else {
-                                proxy_clone.ask_ai(&prompt).await.unwrap_or_default()
-                            };
-                            let title = raw.trim().trim_matches('"').trim_matches('\'').to_owned();
-                            if !title.is_empty() {
-                                let _ = msg_tx.send(ChatMsg::Title { conv_id, title }).await;
+                match req {
+                    ChatReq::NewTurn { conv_id, history } => {
+                        let _ = chat_msg_tx.send(ChatMsg::Start { conv_id }).await;
+                        match proxy.chat_streaming(history).await {
+                            Ok(session) => {
+                                session_map.insert(session, conv_id);
+                            }
+                            Err(e) => {
+                                tracing::warn!(conv_id, "chat_streaming D-Bus call failed: {e}");
+                                let _ = chat_msg_tx.send(ChatMsg::Chunk {
+                                    conv_id,
+                                    text: format!("Error: {e}"),
+                                }).await;
+                                let _ = chat_msg_tx.send(ChatMsg::Done { conv_id, full_text: String::new() }).await;
                             }
                         }
                     }
-                });
+                    ChatReq::Summarize { conv_id, user_msg, assistant_msg } => {
+                        let prompt = format!(
+                            "Summarize the topic of this exchange in 3 to 5 words.\n\
+                             Return ONLY the title text — no quotes, no trailing punctuation.\n\n\
+                             User: {user_msg}\nAssistant: {assistant_msg}"
+                        );
+                        let turns = vec![ChatTurn::user(prompt)];
+                        match proxy.chat_streaming(turns).await {
+                            Ok(session) => {
+                                // Use negative session-like conv_id to distinguish summarize from chat
+                                // Since session IDs are positive, we store the conv_id directly.
+                                session_map.insert(session, conv_id);
+                            }
+                            Err(e) => {
+                                tracing::warn!(conv_id, "summarize D-Bus call failed: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+            Some(signal) = chat_chunk_stream.next() => {
+                if let Ok(args) = signal.args() {
+                    if let Some(&conv_id) = session_map.get(&args.session) {
+                        let _ = chat_msg_tx.send(ChatMsg::Chunk {
+                            conv_id,
+                            text: args.text.to_string(),
+                        }).await;
+                    }
+                }
+            }
+            Some(signal) = chat_done_stream.next() => {
+                if let Ok(args) = signal.args() {
+                    if let Some(&conv_id) = session_map.get(&args.session) {
+                        let _ = chat_msg_tx.send(ChatMsg::Done {
+                            conv_id,
+                            full_text: args.text.to_string(),
+                        }).await;
+                    }
+                    session_map.remove(&args.session);
+                }
+            }
+            Some(signal) = chat_error_stream.next() => {
+                if let Ok(args) = signal.args() {
+                    let conv_id = session_map.remove(&args.session);
+                    let msg = args.msg.to_string();
+                    if let Some(secs) = parse_rate_limit(&msg) {
+                        if let Some(conv_id) = conv_id {
+                            let _ = chat_msg_tx.send(ChatMsg::RateLimit { conv_id, secs }).await;
+                        }
+                    } else if let Some(conv_id) = conv_id {
+                        let _ = chat_msg_tx.send(ChatMsg::Chunk {
+                            conv_id,
+                            text: msg.clone(),
+                        }).await;
+                        let _ = chat_msg_tx.send(ChatMsg::Done { conv_id, full_text: msg }).await;
+                    }
+                }
             }
             else => break,
         }
     }
     Ok(())
+}
+
+/// Parse "rate_limit:<secs>:<text>" → secs.
+fn parse_rate_limit(msg: &str) -> Option<u64> {
+    let parts: Vec<&str> = msg.split(':').collect();
+    if parts.first().map(|s| *s == "rate_limit").unwrap_or(false) && parts.len() >= 2 {
+        parts[1].parse::<u64>().ok()
+    } else {
+        None
+    }
 }

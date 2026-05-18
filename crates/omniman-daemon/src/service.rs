@@ -3,17 +3,20 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use omniman_ai::GeminiClient;
+use dashmap::DashMap;
+use omniman_ai::{GeminiClient, OpenAiClient};
 use omniman_clipboard::ClipboardStore;
-use omniman_core::types::{ClipEntry, Hit, ModelEntry};
+use omniman_core::types::{ChatTurn, ClipEntry, Hit, ModelEntry};
 use omniman_index::FileIndex;
 use zbus::interface;
 
 pub struct OmnimanService {
     pub index: Arc<FileIndex>,
     pub clipboard: Arc<Mutex<ClipboardStore>>,
-    pub ai: Option<Arc<GeminiClient>>,
+    pub ai_gemini: Option<Arc<GeminiClient>>,
+    pub ai_openai: Option<Arc<OpenAiClient>>,
     pub home: PathBuf,
+    pub sessions: DashMap<u64, async_channel::Sender<String>>,
 }
 
 #[interface(name = "org.adrien.Omniman1")]
@@ -39,22 +42,43 @@ impl OmnimanService {
         }
     }
 
-    async fn ask_ai(&self, prompt: &str) -> String {
-        tracing::debug!(%prompt, "ask_ai");
-        let Some(client) = &self.ai else {
-            return "GEMINI_API_KEY is not configured. Set it as an environment variable for omnimand.".into();
-        };
-        match client.ask(prompt).await {
-            Ok(text) => text,
-            Err(e) => {
-                tracing::warn!("Gemini error: {e}");
-                format!("Error: {e}")
-            }
+    async fn chat_streaming(
+        &self,
+        history: Vec<ChatTurn>,
+        #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
+    ) -> u64 {
+        if self.ai_openai.is_none() && self.ai_gemini.is_none() {
+            Self::chat_error(&emitter, 0, "No AI client configured. Set a Gemini or OpenAI API key in preferences.").await.ok();
+            return 0;
         }
+
+        let session = self.next_session_id();
+        let (chunk_tx, _chunk_rx) = async_channel::bounded::<String>(64);
+        self.sessions.insert(session, chunk_tx);
+
+        let emitter = emitter.into_owned();
+
+        if let Some(client) = self.ai_openai.clone() {
+            let sessions = self.sessions.clone();
+            let emitter = emitter.clone();
+            tracing::info!(session, client = "openai", turns = history.len(), "chat_streaming started");
+            tokio::spawn(async move {
+                stream_openai(emitter, session, sessions, client, history).await;
+            });
+        } else if let Some(client) = self.ai_gemini.clone() {
+            let sessions = self.sessions.clone();
+            let emitter = emitter.clone();
+            tracing::info!(session, client = "gemini", turns = history.len(), "chat_streaming started");
+            tokio::spawn(async move {
+                stream_gemini(emitter, session, sessions, client, history).await;
+            });
+        }
+
+        session
     }
 
     async fn list_models(&self) -> Vec<ModelEntry> {
-        let Some(client) = &self.ai else {
+        let Some(client) = &self.ai_gemini else {
             tracing::debug!("list_models: no Gemini client configured");
             return vec![];
         };
@@ -119,6 +143,124 @@ impl OmnimanService {
 
     #[zbus(signal)]
     pub async fn clipboard_changed(emitter: &zbus::object_server::SignalEmitter<'_>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn chat_chunk(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        session: u64,
+        text: &str,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn chat_done(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        session: u64,
+        text: &str,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn chat_error(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        session: u64,
+        msg: &str,
+    ) -> zbus::Result<()>;
+}
+
+impl OmnimanService {
+    fn next_session_id(&self) -> u64 {
+        let mut id = self.sessions.len() as u64 + 1;
+        while self.sessions.contains_key(&id) {
+            id += 1;
+        }
+        id
+    }
+}
+
+/// Stream a Gemini chat, forwarding chunks via D-Bus signals.
+async fn stream_gemini(
+    emitter: zbus::object_server::SignalEmitter<'static>,
+    session: u64,
+    sessions: DashMap<u64, async_channel::Sender<String>>,
+    client: Arc<GeminiClient>,
+    history: Vec<ChatTurn>,
+) {
+    let (chunk_tx, chunk_rx) = async_channel::bounded::<String>(64);
+
+    let stream_task = tokio::spawn(async move {
+        client.chat_streaming(&history, &chunk_tx).await
+    });
+
+    let emit = emitter.clone();
+    let accumulated = tokio::spawn(async move {
+        let mut acc = String::new();
+        while let Ok(chunk) = chunk_rx.recv().await {
+            acc.push_str(&chunk);
+            OmnimanService::chat_chunk(&emit, session, &chunk).await.ok();
+        }
+        acc
+    }).await.unwrap_or_default();
+
+    finish_stream(&emitter, session, &sessions, accumulated, stream_task.await).await;
+}
+
+/// Stream an OpenAI-compatible chat, forwarding chunks via D-Bus signals.
+async fn stream_openai(
+    emitter: zbus::object_server::SignalEmitter<'static>,
+    session: u64,
+    sessions: DashMap<u64, async_channel::Sender<String>>,
+    client: Arc<OpenAiClient>,
+    history: Vec<ChatTurn>,
+) {
+    let (chunk_tx, chunk_rx) = async_channel::bounded::<String>(64);
+
+    let stream_task = tokio::spawn(async move {
+        client.chat_streaming(&history, &chunk_tx).await
+    });
+
+    let emit = emitter.clone();
+    let accumulated = tokio::spawn(async move {
+        let mut acc = String::new();
+        while let Ok(chunk) = chunk_rx.recv().await {
+            acc.push_str(&chunk);
+            OmnimanService::chat_chunk(&emit, session, &chunk).await.ok();
+        }
+        acc
+    }).await.unwrap_or_default();
+
+    finish_stream(&emitter, session, &sessions, accumulated, stream_task.await).await;
+}
+
+async fn finish_stream(
+    emitter: &zbus::object_server::SignalEmitter<'static>,
+    session: u64,
+    sessions: &DashMap<u64, async_channel::Sender<String>>,
+    accumulated: String,
+    stream_result: Result<anyhow::Result<()>, tokio::task::JoinError>,
+) {
+    match stream_result {
+        Ok(Ok(())) => {
+            OmnimanService::chat_done(emitter, session, &accumulated).await.ok();
+        }
+        Ok(Err(e)) => {
+            let msg = format_error(&e);
+            tracing::warn!(session, "chat_streaming error: {e}");
+            OmnimanService::chat_error(emitter, session, &msg).await.ok();
+        }
+        Err(join_err) => {
+            let msg = format!("error:{}", join_err);
+            tracing::warn!(session, "chat_streaming task failed: {join_err}");
+            OmnimanService::chat_error(emitter, session, &msg).await.ok();
+        }
+    }
+    sessions.remove(&session);
+}
+
+fn format_error(e: &anyhow::Error) -> String {
+    if let Some(rl) = e.downcast_ref::<omniman_ai::RateLimitError>() {
+        format!("rate_limit:{}:{}", rl.retry_after_secs, "Rate limited")
+    } else {
+        format!("error::{}", e)
+    }
 }
 
 #[cfg(test)]
@@ -141,8 +283,10 @@ mod tests {
         OmnimanService {
             index,
             clipboard,
-            ai: None,
+            ai_gemini: None,
+            ai_openai: None,
             home: tmp.path().to_path_buf(),
+            sessions: DashMap::new(),
         }
     }
 
@@ -173,16 +317,5 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let svc = make_service(&tmp);
         assert!(svc.clipboard_history(10).await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn ask_ai_without_key_returns_message() {
-        let tmp = TempDir::new().unwrap();
-        let svc = make_service(&tmp);
-        let resp = svc.ask_ai("hello").await;
-        assert!(
-            resp.contains("GEMINI_API_KEY"),
-            "should mention missing key, got: {resp}"
-        );
     }
 }

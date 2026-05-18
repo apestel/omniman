@@ -35,3 +35,47 @@ pub struct ClipEntry {
     pub mime: String,
     pub created_at: i64,
 }
+
+/// Role of a chat participant.
+#[derive(Debug, Clone, Serialize, Deserialize, zbus::zvariant::Type, PartialEq, Eq)]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
+
+impl Default for ChatRole {
+    fn default() -> Self {
+        Self::User
+    }
+}
+
+/// A single turn in a multi-turn AI conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, zbus::zvariant::Type)]
+pub struct ChatTurn {
+    pub role: ChatRole,
+    pub content: String,
+}
+
+impl Default for ChatTurn {
+    fn default() -> Self {
+        Self {
+            role: ChatRole::default(),
+            content: String::new(),
+        }
+    }
+}
+
+impl ChatTurn {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::User,
+            content: content.into(),
+        }
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::Assistant,
+            content: content.into(),
+        }
+    }
+}

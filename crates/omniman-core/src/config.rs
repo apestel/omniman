@@ -27,7 +27,7 @@ pub struct ClipboardConfig {
 #[serde(default)]
 pub struct AiConfig {
     pub model: String,
-    /// Gemini API key. Overridden by the GEMINI_API_KEY environment variable.
+    /// Gemini API key. Managed via the UI preferences.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gemini_api_key: Option<String>,
     /// Base URL for an OpenAI-compatible endpoint (e.g. https://api.openai.com/v1).

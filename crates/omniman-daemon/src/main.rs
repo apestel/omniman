@@ -3,7 +3,7 @@ mod service;
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Context;
-use omniman_ai::GeminiClient;
+use omniman_ai::{GeminiClient, OpenAiClient};
 use omniman_clipboard::ClipboardStore;
 use omniman_core::{config::Config, ipc};
 use omniman_index::{watcher, FileIndex};
@@ -49,29 +49,43 @@ async fn main() -> anyhow::Result<()> {
         ClipboardStore::open(&clip_db).context("opening clipboard store")?,
     ));
 
-    // ── Gemini client ─────────────────────────────────────────────────────────
-    let ai_client = {
-        let key = std::env::var("GEMINI_API_KEY")
-            .ok()
-            .or_else(|| config.ai.gemini_api_key.clone());
-        match key {
-            Some(k) => {
-                info!(model = %config.ai.model, "Gemini client ready");
-                Some(Arc::new(GeminiClient::new(k, config.ai.model.clone())))
+    // ── AI clients (config only) ──────────────────────────────────────────────
+    let ai_openai: Option<Arc<OpenAiClient>> =
+        match (&config.ai.openai_endpoint, &config.ai.openai_key) {
+            (Some(ep), Some(key)) if !ep.is_empty() && !key.is_empty() => {
+                info!(endpoint = %ep, model = %config.ai.openai_model, "OpenAI client ready");
+                Some(Arc::new(OpenAiClient::new(
+                    key.clone(),
+                    ep.clone(),
+                    config.ai.openai_model.clone(),
+                )))
             }
-            None => {
-                tracing::warn!("AI unavailable: no GEMINI_API_KEY and no key in settings");
+            _ => None,
+        };
+
+    let ai_gemini: Option<Arc<GeminiClient>> = if ai_openai.is_none() {
+        match &config.ai.gemini_api_key {
+            Some(key) if !key.is_empty() => {
+                info!(model = %config.ai.model, "Gemini client ready");
+                Some(Arc::new(GeminiClient::new(key.clone(), config.ai.model.clone())))
+            }
+            _ => {
+                tracing::warn!("Gemini unavailable: no API key in settings");
                 None
             }
         }
+    } else {
+        None
     };
 
     // ── D-Bus service ─────────────────────────────────────────────────────────
     let service = OmnimanService {
         index: Arc::clone(&file_index),
         clipboard: Arc::clone(&clip_store),
-        ai: ai_client,
+        ai_gemini,
+        ai_openai,
         home: home.clone(),
+        sessions: dashmap::DashMap::new(),
     };
     let conn = zbus::connection::Builder::session()?
         .name(ipc::BUS_NAME)?

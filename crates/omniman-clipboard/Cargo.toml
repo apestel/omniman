@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 omniman-core = { path = "../omniman-core" }
-wl-clipboard-rs = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

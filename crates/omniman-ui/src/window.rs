@@ -2,7 +2,7 @@ use std::{cell::{Cell, RefCell}, rc::Rc, sync::Arc, time::Duration};
 
 use gtk4::{gdk, glib, prelude::*};
 use libadwaita::prelude::*;
-use omniman_ai::ChatTurn;
+use omniman_core::types::ChatTurn;
 use omniman_core::{config::Config, types::{ClipEntry, Hit}};
 
 use crate::{

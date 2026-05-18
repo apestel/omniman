@@ -19,8 +19,8 @@ Target platform is **Arch Linux + Wayland + GNOME (Mutter)**. This constrains to
 
 Two-process design:
 
-- **`omnimand`** (daemon) — long-running systemd user service. Owns the Tantivy index, the clipboard SQLite store, and exposes a D-Bus interface on `org.adrien.OmnimanDaemon` (zbus) with methods `Search`, `ClipboardHistory`, `StoreClipEntry`, `AskAI`, `RequestShowUi` and signals `ShowUi`, `ClipboardChanged`.
-- **`omniman`** (GTK4 client) — runs persistently in the background (hide-on-close). Connects over D-Bus, listens for the `ShowUi` signal, renders results, dispatches actions (open file, paste clip, stream AI response).
+- **`omnimand`** (daemon) — long-running systemd user service. Owns the Tantivy index, the clipboard SQLite store, AI clients (Gemini + OpenAI-compatible), and exposes a D-Bus interface on `org.adrien.OmnimanDaemon` (zbus) with methods `Search`, `ClipboardHistory`, `StoreClipEntry`, `ChatStreaming`, `RequestShowUi` and signals `ShowUi`, `ClipboardChanged`, `ChatChunk`, `ChatDone`, `ChatError`.
+- **`omniman`** (GTK4 client) — runs persistently in the background (hide-on-close). Connects over D-Bus, listens for the `ShowUi` signal, renders results, dispatches actions (open file, paste clip). AI requests are routed through the daemon via `ChatStreaming` D-Bus method + `ChatChunk`/`ChatDone`/`ChatError` signals.
 
 Cargo workspace under `crates/`:
 
@@ -29,8 +29,7 @@ Cargo workspace under `crates/`:
 | `omniman-core` | shared types, config schema, D-Bus interface definitions |
 | `omniman-index` | Tantivy index + `notify` watcher |
 | `omniman-clipboard` | SQLite store only (clipboard polling moved to UI via GTK4) |
-| `omniman-ai` | Gemini REST client + question heuristic |
-| `omniman-portal` | XDG `GlobalShortcuts` portal via `ashpd` (vestigial — not wired up; see hotkey note below) |
+| `omniman-ai` | Gemini + OpenAI-compatible REST clients + question heuristic |
 | `omniman-daemon` | `omnimand` binary |
 | `omniman-ui` | `omniman` binary (GTK4 + libadwaita) |
 
@@ -59,7 +58,7 @@ gdbus call --session --dest org.adrien.OmnimanDaemon \
 - **Mutter does not implement `wlr-layer-shell`.** Do not pull in `gtk4-layer-shell`, `layer-shika`, or any wlroots-only crate. The launcher window is a regular `xdg-toplevel`. Tools like Anyrun/Fuzzel/tofi/Walker would not work here — that's why this project exists.
 - **Hotkey** is registered via GNOME gsettings (`data/setup-shortcut.sh`), not via the XDG GlobalShortcuts portal. The portal approach was attempted but GNOME rejects `bind_shortcuts` without a live Wayland surface as parent.
 - **Clipboard** polling runs in the UI process via GTK4's `gdk4::Clipboard::read_text_future()` (uses standard `data-device` protocol, works on Mutter). The daemon only owns the SQLite store and exposes `StoreClipEntry` / `ClipboardHistory` D-Bus methods.
-- **Gemini API key** lives in Secret Service (libsecret), never in TOML config.
+- **API keys** (Gemini, OpenAI) are stored in `~/.config/omniman/config.toml` and managed via the UI preferences. The daemon reads them at startup; the UI has no direct access to keys.
 
 ## Key decisions already locked
 

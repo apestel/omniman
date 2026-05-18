@@ -170,7 +170,7 @@ fn build_ai_page(win: &libadwaita::PreferencesWindow, config: Rc<RefCell<Config>
                 if fetched.is_empty() {
                     let ids = FALLBACK.iter().map(|(id, _)| id.to_string()).collect();
                     let names = FALLBACK.iter().map(|(_, n)| n.to_string()).collect();
-                    (ids, names, "Daemon unreachable or no GEMINI_API_KEY set")
+                    (ids, names, "Daemon unreachable or no API key configured")
                 } else {
                     let ids = fetched.iter().map(|m| m.id.clone()).collect();
                     let names = fetched.iter().map(|m| m.display_name.clone()).collect();
@@ -199,7 +199,7 @@ fn build_ai_page(win: &libadwaita::PreferencesWindow, config: Rc<RefCell<Config>
     // ── OpenAI-compatible endpoint ────────────────────────────────────────────
     let oai_group = libadwaita::PreferencesGroup::builder()
         .title("OpenAI-compatible endpoint")
-        .description("When set, overrides Gemini. Restart Omniman to apply.")
+        .description("When set, overrides Gemini. Restart omnimand to apply.")
         .build();
     page.add(&oai_group);
 

@@ -11,7 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 omniman-core = { path = "../omniman-core" }
-omniman-ai = { path = "../omniman-ai" }
 gtk4 = { workspace = true }
 libadwaita = { workspace = true }
 async-channel = { workspace = true }

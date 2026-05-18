@@ -41,11 +41,11 @@ gtk4 = { version = "0.9", features = ["v4_12"] }
 libadwaita = { version = "0.7", features = ["v1_5"] }
 # async channel (GTK↔tokio bridge)
 async-channel = "2"
-# clipboard
-wl-clipboard-rs = "0.9"
 # HTTP (Gemini)
 reqwest = { version = "0.12", features = ["json", "stream"] }
 # SQLite
 rusqlite = { version = "0.32" }
 # Markdown parsing
 pulldown-cmark = "0.12"
+# concurrent hash map
+dashmap = "6"
