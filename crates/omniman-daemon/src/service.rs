@@ -17,6 +17,7 @@ pub struct OmnimanService {
     pub ai_openai: Option<Arc<OpenAiClient>>,
     pub home: PathBuf,
     pub max_depth: usize,
+    pub history_limit: usize,
     pub sessions: DashMap<u64, async_channel::Sender<String>>,
 }
 
@@ -130,7 +131,9 @@ impl OmnimanService {
         #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         let changed = if let Ok(store) = self.clipboard.lock() {
-            store.insert(kind, content, mime).unwrap_or(false)
+            let ins = store.insert(kind, content, mime).unwrap_or(false);
+            let _ = store.prune(self.history_limit);
+            ins
         } else {
             false
         };
@@ -261,7 +264,7 @@ fn format_error(e: &anyhow::Error) -> String {
     if let Some(rl) = e.downcast_ref::<omniman_ai::RateLimitError>() {
         format!("rate_limit:{}:{}", rl.retry_after_secs, "Rate limited")
     } else {
-        format!("error::{}", e)
+        format!("error:{}", e)
     }
 }
 
@@ -280,7 +283,7 @@ mod tests {
             .unwrap(),
         );
         let clipboard = Arc::new(Mutex::new(
-            omniman_clipboard::ClipboardStore::open(&tmp.path().join("clip.db")).unwrap(),
+            omniman_clipboard::ClipboardStore::open(&tmp.path().join("clip.db"), None).unwrap(),
         ));
         OmnimanService {
             index,
@@ -289,6 +292,7 @@ mod tests {
             ai_openai: None,
             home: tmp.path().to_path_buf(),
             max_depth: IndexConfig::default().max_depth,
+            history_limit: 500,
             sessions: DashMap::new(),
         }
     }
@@ -320,5 +324,34 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let svc = make_service(&tmp);
         assert!(svc.clipboard_history(10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clipboard_store_and_retrieve() {
+        let tmp = TempDir::new().unwrap();
+        let svc = make_service(&tmp);
+             let conn = zbus::Connection::session().await.unwrap();
+            let emitter = zbus::object_server::SignalEmitter::new(&conn, omniman_core::ipc::OBJECT_PATH).unwrap();
+            svc.store_clip_entry("Text", "hello world", "text/plain", emitter).await.unwrap();
+        let entries = svc.clipboard_history(10).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "hello world");
+    }
+
+    #[tokio::test]
+    async fn clipboard_prune_respects_history_limit() {
+        let tmp = TempDir::new().unwrap();
+        let mut svc = make_service(&tmp);
+        svc.history_limit = 3;
+        let conn = zbus::Connection::session().await.unwrap();
+        let emitter = zbus::object_server::SignalEmitter::new(&conn, omniman_core::ipc::OBJECT_PATH).unwrap();
+        for i in 0..5 {
+            svc.store_clip_entry("Text", &format!("entry{}", i), "text/plain", emitter.clone()).await.unwrap();
+        }
+        let entries = svc.clipboard_history(100).await;
+        assert_eq!(entries.len(), 3, "should only keep last 3 entries");
+        assert_eq!(entries[0].content, "entry4");
+        assert_eq!(entries[1].content, "entry3");
+        assert_eq!(entries[2].content, "entry2");
     }
 }

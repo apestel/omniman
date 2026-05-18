@@ -51,8 +51,9 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Clipboard ─────────────────────────────────────────────────────────────
     let clip_db = Config::data_dir().join("clipboard.db");
+    let encryption = omniman_clipboard::ClipEncryption::new().await.ok();
     let clip_store = Arc::new(Mutex::new(
-        ClipboardStore::open(&clip_db).context("opening clipboard store")?,
+        ClipboardStore::open(&clip_db, encryption).context("opening clipboard store")?,
     ));
 
     // ── AI clients (config only) ──────────────────────────────────────────────
@@ -92,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
         ai_openai,
         home: home.clone(),
         max_depth: config.index.max_depth,
+        history_limit: config.clipboard.history_limit,
         sessions: dashmap::DashMap::new(),
     };
     let conn = zbus::connection::Builder::session()?

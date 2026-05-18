@@ -99,18 +99,11 @@ You can use either **Gemini** (Google AI Studio) or any **OpenAI-compatible** en
 
 #### Gemini
 
-Set the API key via environment variable:
-```bash
-systemctl --user edit omnimand
+Set `gemini_api_key` in `~/.config/omniman/config.toml`:
+```toml
+[ai]
+gemini_api_key = "your_key_here"
 ```
-Add under `[Service]`:
-```ini
-Environment=GEMINI_API_KEY=your_key_here
-```
-
-Or export `GEMINI_API_KEY` in your session environment (`~/.config/environment.d/`).
-
-Alternatively, set `gemini_api_key` directly in `~/.config/omniman/config.toml`.
 
 #### OpenAI-compatible endpoint
 
@@ -163,7 +156,7 @@ history_limit = 500
 [ai]
 # Gemini model to use
 model = "gemini-2.5-flash"
-# Gemini API key (or set GEMINI_API_KEY environment variable)
+# Gemini API key
 # gemini_api_key = "your_key_here"
 
 # OpenAI-compatible endpoint (alternative to Gemini)

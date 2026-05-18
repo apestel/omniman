@@ -125,7 +125,7 @@ Comportement :
 
 ### Phase 6 — AI Studio (Gemini)
 - Crate `omniman-ai` : client REST `generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`.
-- Clé API : variable env `GEMINI_API_KEY` ou Secret Service.
+- Clé API : `gemini_api_key` dans `~/.config/omniman/config.toml`.
 - Streaming SSE pour réponse progressive.
 - Heuristique question : module `is_question(query: &str) -> bool`.
 - UI : panneau réponse avec rendu markdown (gtk4 `TextView` + tags).

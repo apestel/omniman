@@ -28,6 +28,13 @@ pub enum ChatMsg {
     Title { conv_id: i64, title: String },
 }
 
+/// Clipboard content detected by the UI monitor.
+pub struct ClipContent {
+    pub content: String,
+    pub kind: String,
+    pub mime: String,
+}
+
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -44,7 +51,7 @@ fn main() -> glib::ExitCode {
     let (chat_req_tx, chat_req_rx) = async_channel::bounded::<ChatReq>(4);
     let (chat_msg_tx, chat_msg_rx) = async_channel::bounded::<ChatMsg>(128);
 
-    let (clip_content_tx, clip_content_rx) = async_channel::bounded::<String>(8);
+     let (clip_content_tx, clip_content_rx) = async_channel::bounded::<ClipContent>(8);
     let clip_content_rx = Arc::new(std::sync::Mutex::new(Some(clip_content_rx)));
 
     std::thread::spawn(move || {
@@ -102,7 +109,7 @@ async fn dbus_worker(
     clip_result_tx: async_channel::Sender<Vec<ClipEntry>>,
     chat_req_rx: async_channel::Receiver<ChatReq>,
     chat_msg_tx: async_channel::Sender<ChatMsg>,
-    clip_content_rx: Arc<std::sync::Mutex<Option<async_channel::Receiver<String>>>>,
+    clip_content_rx: Arc<std::sync::Mutex<Option<async_channel::Receiver<ClipContent>>>>,
 ) {
     let clip_content_rx = clip_content_rx.lock().unwrap().take().expect("dbus_worker once");
     loop {
@@ -135,7 +142,7 @@ async fn connect_and_serve(
     clip_result_tx: &async_channel::Sender<Vec<ClipEntry>>,
     chat_req_rx: &async_channel::Receiver<ChatReq>,
     chat_msg_tx: &async_channel::Sender<ChatMsg>,
-    clip_content_rx: &async_channel::Receiver<String>,
+    clip_content_rx: &async_channel::Receiver<ClipContent>,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     use futures_util::StreamExt;
@@ -188,9 +195,8 @@ async fn connect_and_serve(
                 let entries = proxy.clipboard_history(50).await.unwrap_or_default();
                 if clip_result_tx.send(entries).await.is_err() { break; }
             }
-            Ok(content) = clip_content_rx.recv() => {
-                let kind = if content.starts_with("file://") { "Uri" } else { "Text" };
-                let _ = proxy.store_clip_entry(&kind, &content, "text/plain").await;
+            Ok(cc) = clip_content_rx.recv() => {
+                let _ = proxy.store_clip_entry(&cc.kind, &cc.content, &cc.mime).await;
             }
             Ok(req) = chat_req_rx.recv() => {
                 match req {

@@ -8,8 +8,10 @@ license.workspace = true
 [dependencies]
 omniman-core = { path = "../omniman-core" }
 rusqlite = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
+aes-gcm = { workspace = true }
+getrandom = { workspace = true }
+secret-service = { workspace = true }
+base64 = { workspace = true }

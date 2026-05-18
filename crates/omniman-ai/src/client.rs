@@ -96,12 +96,6 @@ impl GeminiClient {
         Self { client: Client::new(), api_key, model }
     }
 
-    pub fn from_env(model: &str) -> Result<Self> {
-        let key =
-            std::env::var("GEMINI_API_KEY").context("GEMINI_API_KEY env var not set")?;
-        Ok(Self::new(key, model.to_owned()))
-    }
-
     /// Fetch all models that support generateContent, sorted by display name.
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let url = format!(

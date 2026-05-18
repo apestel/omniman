@@ -5,10 +5,10 @@ use libadwaita::prelude::*;
 use omniman_core::types::ChatTurn;
 use omniman_core::{config::Config, types::{ClipEntry, Hit}};
 
-use crate::{
-    chat::ChatStore,
-    ChatMsg, ChatReq,
-};
+  use crate::{
+        chat::ChatStore,
+        ChatMsg, ChatReq, ClipContent,
+    };
 
 pub fn build(
     app: &libadwaita::Application,
@@ -19,7 +19,7 @@ pub fn build(
     clip_result_rx: async_channel::Receiver<Vec<ClipEntry>>,
     chat_req_tx: async_channel::Sender<ChatReq>,
     chat_msg_rx: async_channel::Receiver<ChatMsg>,
-    clip_content_tx: async_channel::Sender<String>,
+    clip_content_tx: async_channel::Sender<ClipContent>,
 ) -> libadwaita::ApplicationWindow {
     load_css();
 
@@ -45,17 +45,37 @@ pub fn build(
         let tx = clip_content_tx.clone();
         let last = Arc::new(std::sync::Mutex::new(String::new()));
 
+            fn read_clipboard_content(cb: &gdk::Clipboard) -> impl std::future::Future<Output = Option<ClipContent>> + use<'_> {
+            async move {
+                // Try text first
+                if let Ok(Some(content)) = cb.read_text_future().await {
+                    let s = content.to_string();
+                    if !s.trim().is_empty() {
+                        let kind = if s.starts_with("file://") { "Uri" } else { "Text" };
+                        return Some(ClipContent { content: s, kind: kind.to_string(), mime: "text/plain".to_string() });
+                    }
+                }
+                // Try image via texture
+                if let Ok(Some(texture)) = cb.read_texture_future().await {
+                         let bytes = texture.save_to_png_bytes();
+                         let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes.as_ref());
+                    return Some(ClipContent { content: encoded, kind: "Image".to_string(), mime: "image/png".to_string() });
+                }
+                None
+            }
+        }
+
         // Initial read on startup
         {
             let clipboard = clipboard.clone();
             let tx = tx.clone();
             let last = Arc::clone(&last);
             glib::spawn_future_local(async move {
-                if let Ok(Some(content)) = clipboard.read_text_future().await {
-                    let s = content.to_string();
-                    if !s.trim().is_empty() {
-                        *last.lock().unwrap() = s.clone();
-                        let _ = tx.send(s).await;
+                if let Some(cc) = read_clipboard_content(&clipboard).await {
+                    let prev = last.lock().unwrap().clone();
+                    if cc.content != prev {
+                        *last.lock().unwrap() = cc.content.clone();
+                        let _ = tx.send(cc).await;
                     }
                 }
             });
@@ -71,12 +91,11 @@ pub fn build(
                 let tx = tx.clone();
                 let last = Arc::clone(&last);
                 glib::spawn_future_local(async move {
-                    if let Ok(Some(content)) = clipboard.read_text_future().await {
-                        let s = content.to_string();
+                    if let Some(cc) = read_clipboard_content(&clipboard).await {
                         let prev = last.lock().unwrap().clone();
-                        if !s.trim().is_empty() && s != prev {
-                            *last.lock().unwrap() = s.clone();
-                            let _ = tx.send(s).await;
+                        if cc.content != prev {
+                            *last.lock().unwrap() = cc.content.clone();
+                            let _ = tx.send(cc).await;
                         }
                     }
                 });
@@ -790,20 +809,47 @@ pub fn build(
             while let Ok(entries) = clip_result_rx.recv().await {
                 while let Some(child) = clip_list.first_child() { clip_list.remove(&child); }
                 for entry in &entries {
-                    let preview: String = entry.content.chars().take(120).collect();
                     let row = libadwaita::ActionRow::builder()
-                        .title(glib::markup_escape_text(&preview))
-                        .subtitle(glib::markup_escape_text(&entry.content))
                         .activatable(true)
                         .build();
-                    let icon_name = match entry.kind.as_str() {
-                        "Uri" => "folder-symbolic",
-                        "Image" => "image-x-generic-symbolic",
-                        _ => "edit-paste-symbolic",
-                    };
-                    let icon = gtk4::Image::from_icon_name(icon_name);
-                    icon.set_pixel_size(20);
-                    row.add_prefix(&icon);
+                    match entry.kind.as_str() {
+                        "Image" => {
+                            row.set_subtitle("Image");
+                            if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &entry.content) {
+                                if let Ok(texture) = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)) {
+                                    let preview = gtk4::Image::new();
+                                    preview.set_property("texture", Some(&texture));
+                                    preview.set_pixel_size(48);
+                                    preview.add_css_class("clip-image-preview");
+                                    row.add_prefix(&preview);
+                                } else {
+                                    let icon = gtk4::Image::from_icon_name("image-x-generic-symbolic");
+                                    icon.set_pixel_size(24);
+                                    row.add_prefix(&icon);
+                                }
+                            } else {
+                                let icon = gtk4::Image::from_icon_name("image-x-generic-symbolic");
+                                icon.set_pixel_size(24);
+                                row.add_prefix(&icon);
+                            }
+                        }
+                        "Uri" => {
+                            let preview: String = entry.content.chars().take(120).collect();
+                            row.set_title(&glib::markup_escape_text(&preview));
+                            row.set_subtitle(&glib::markup_escape_text(&entry.content));
+                            let icon = gtk4::Image::from_icon_name("folder-symbolic");
+                            icon.set_pixel_size(20);
+                            row.add_prefix(&icon);
+                        }
+                        _ => {
+                            let preview: String = entry.content.chars().take(120).collect();
+                            row.set_title(&glib::markup_escape_text(&preview));
+                            row.set_subtitle(&glib::markup_escape_text(&entry.content));
+                            let icon = gtk4::Image::from_icon_name("edit-paste-symbolic");
+                            icon.set_pixel_size(20);
+                            row.add_prefix(&icon);
+                        }
+                    }
                     clip_list.append(&row);
                 }
             }
@@ -1192,11 +1238,13 @@ fn setup_text_tags(buffer: &gtk4::TextBuffer) {
 fn load_css() {
     let provider = gtk4::CssProvider::new();
     provider.load_from_string(include_str!("style.css"));
-    gtk4::style_context_add_provider_for_display(
-        &gdk::Display::default().expect("no display"),
-        &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    if let Some(display) = gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 }
 
 fn mime_icon(path: &str) -> &'static str {

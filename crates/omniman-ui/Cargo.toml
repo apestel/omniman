@@ -20,6 +20,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 futures-util = "0.3"
-pulldown-cmark = { workspace = true }
+ pulldown-cmark = { workspace = true }
 rusqlite = { workspace = true }
+base64 = { workspace = true }
 
