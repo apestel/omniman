@@ -16,6 +16,7 @@ pub struct OmnimanService {
     pub ai_gemini: Option<Arc<GeminiClient>>,
     pub ai_openai: Option<Arc<OpenAiClient>>,
     pub home: PathBuf,
+    pub max_depth: usize,
     pub sessions: DashMap<u64, async_channel::Sender<String>>,
 }
 
@@ -112,8 +113,9 @@ impl OmnimanService {
         tracing::info!("Reindex requested via D-Bus");
         let index = Arc::clone(&self.index);
         let home = self.home.clone();
+        let max_depth = self.max_depth;
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = index.crawl(&home) {
+            if let Err(e) = index.crawl(&home, max_depth) {
                 tracing::error!("manual reindex failed: {e}");
             }
         });
@@ -286,6 +288,7 @@ mod tests {
             ai_gemini: None,
             ai_openai: None,
             home: tmp.path().to_path_buf(),
+            max_depth: IndexConfig::default().max_depth,
             sessions: DashMap::new(),
         }
     }
@@ -305,7 +308,7 @@ mod tests {
         std::fs::write(home.join("needle.txt"), "content").unwrap();
 
         let svc = make_service(&tmp);
-        svc.index.crawl(&home).unwrap();
+        svc.index.crawl(&home, svc.max_depth).unwrap();
         svc.index.reload().unwrap();
 
         let hits = svc.search("needle", 10).await;

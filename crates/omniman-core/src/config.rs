@@ -14,6 +14,7 @@ pub struct Config {
 #[serde(default)]
 pub struct IndexConfig {
     pub exclude_dirs: Vec<String>,
+    pub max_depth: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +70,7 @@ impl Default for IndexConfig {
                 "__pycache__".into(),
                 ".cargo".into(),
             ],
+            max_depth: 10,
         }
     }
 }

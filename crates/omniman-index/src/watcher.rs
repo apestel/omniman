@@ -20,10 +20,15 @@ pub type WatcherHandle = Arc<Mutex<RecommendedWatcher>>;
 /// pass `Config::data_dir()` so the daemon's own index/DB files never trigger
 /// a re-indexing feedback loop.
 ///
-/// File-system events are accumulated for 2 seconds before being flushed as a
-/// single `apply_batch` call (one IndexWriter, one commit). This prevents the
-/// O(n-writers) cost of handling every rapid-fire event individually.
-pub fn spawn(index: Arc<FileIndex>, root: PathBuf, skip: PathBuf) -> anyhow::Result<WatcherHandle> {
+/// File-system events are accumulated with an adaptive flush: a 200 ms idle
+/// timeout triggers an immediate flush, with a hard 2 s cap to bound burst I/O.
+/// One `apply_batch` call per flush (one IndexWriter, one commit).
+pub fn spawn(
+    index: Arc<FileIndex>,
+    root: PathBuf,
+    skip: PathBuf,
+    max_depth: usize,
+) -> anyhow::Result<WatcherHandle> {
     let (tx, mut rx) = mpsc::unbounded_channel::<notify::Result<Event>>();
 
     let watcher = Arc::new(Mutex::new(
@@ -36,15 +41,33 @@ pub fn spawn(index: Arc<FileIndex>, root: PathBuf, skip: PathBuf) -> anyhow::Res
     // Walk root, add a non-recursive watch per accessible dir, skipping `skip`.
     {
         let mut w = watcher.lock().unwrap();
-        add_watches_recursive(&mut *w, &root, &skip);
+        add_watches_recursive(&mut *w, &root, &skip, max_depth);
     }
 
     let watcher_clone = Arc::clone(&watcher);
     tokio::spawn(async move {
         // true = upsert, false = delete. HashMap deduplicates: last event for a path wins.
         let mut pending: HashMap<PathBuf, bool> = HashMap::new();
-        let mut flush_ticker = tokio::time::interval(Duration::from_secs(2));
-        flush_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut flush_idle = Some(Box::pin(tokio::time::sleep(Duration::from_millis(200))));
+        let mut flush_hard: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+
+        let do_flush = |batch: HashMap<PathBuf, bool>, index: Arc<FileIndex>| {
+            tokio::task::spawn_blocking(move || {
+                let mut upserts = Vec::new();
+                let mut deletes = Vec::new();
+                for (path, is_upsert) in batch {
+                    if is_upsert {
+                        upserts.push(path);
+                    } else {
+                        deletes.push(path);
+                    }
+                }
+                debug!(upserts = upserts.len(), deletes = deletes.len(), "flushing index batch");
+                if let Err(e) = index.apply_batch(&upserts, &deletes) {
+                    warn!("batch index update failed: {e}");
+                }
+            });
+        };
 
         loop {
             tokio::select! {
@@ -52,14 +75,12 @@ pub fn spawn(index: Arc<FileIndex>, root: PathBuf, skip: PathBuf) -> anyhow::Res
                 Some(res) = rx.recv() => {
                     let Ok(event) = res else { continue; };
                     for path in event.paths {
-                        // Never process events from our own data directory.
                         if path.starts_with(&skip) {
                             continue;
                         }
                         match event.kind {
                             EventKind::Create(_) => {
                                 if path.is_dir() {
-                                    // Watch new directories immediately so we don't miss events inside them.
                                     if let Ok(mut w) = watcher_clone.lock() {
                                         if let Err(e) = w.watch(&path, RecursiveMode::NonRecursive) {
                                             if !is_permission_error(&e) {
@@ -72,7 +93,6 @@ pub fn spawn(index: Arc<FileIndex>, root: PathBuf, skip: PathBuf) -> anyhow::Res
                                 }
                             }
                             EventKind::Modify(_) => {
-                                // Only queue if not already marked for delete.
                                 if pending.get(&path).copied() != Some(false) {
                                     pending.insert(path, true);
                                 }
@@ -83,24 +103,24 @@ pub fn spawn(index: Arc<FileIndex>, root: PathBuf, skip: PathBuf) -> anyhow::Res
                             _ => {}
                         }
                     }
-                }
-                _ = flush_ticker.tick() => {
-                    if pending.is_empty() {
-                        continue;
+                    flush_idle = Some(Box::pin(tokio::time::sleep(Duration::from_millis(200))));
+                    if flush_hard.is_none() {
+                        flush_hard = Some(Box::pin(tokio::time::sleep(Duration::from_secs(2))));
                     }
+                }
+                _ = flush_idle.as_mut().unwrap(), if flush_idle.is_some() && !pending.is_empty() => {
+                    flush_idle = None;
+                    flush_hard = None;
                     let batch = std::mem::take(&mut pending);
                     let index = Arc::clone(&index);
-                    tokio::task::spawn_blocking(move || {
-                        let mut upserts = Vec::new();
-                        let mut deletes = Vec::new();
-                        for (path, is_upsert) in batch {
-                            if is_upsert { upserts.push(path); } else { deletes.push(path); }
-                        }
-                        debug!(upserts = upserts.len(), deletes = deletes.len(), "flushing index batch");
-                        if let Err(e) = index.apply_batch(&upserts, &deletes) {
-                            warn!("batch index update failed: {e}");
-                        }
-                    });
+                    do_flush(batch, index);
+                }
+                _ = flush_hard.as_mut().unwrap(), if flush_hard.is_some() && !pending.is_empty() => {
+                    flush_idle = None;
+                    flush_hard = None;
+                    let batch = std::mem::take(&mut pending);
+                    let index = Arc::clone(&index);
+                    do_flush(batch, index);
                 }
             }
         }
@@ -109,9 +129,15 @@ pub fn spawn(index: Arc<FileIndex>, root: PathBuf, skip: PathBuf) -> anyhow::Res
     Ok(watcher)
 }
 
-fn add_watches_recursive(watcher: &mut RecommendedWatcher, root: &std::path::Path, skip: &std::path::Path) {
+fn add_watches_recursive(
+    watcher: &mut RecommendedWatcher,
+    root: &std::path::Path,
+    skip: &std::path::Path,
+    max_depth: usize,
+) {
     for entry in WalkDir::new(root)
         .follow_links(false)
+        .max_depth(max_depth)
         .into_iter()
         .filter_entry(|e| !e.path().starts_with(skip))
         .filter_map(|e| match e {

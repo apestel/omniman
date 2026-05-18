@@ -70,8 +70,8 @@ impl FileIndex {
     /// Cheap startup pass: walk `root`, only touch the writer for new or modified files,
     /// remove paths that no longer exist on disk.  Replaces `crawl()` as the default
     /// startup work — typical idle restart adds zero documents and commits nothing.
-    pub fn sweep(&self, root: &Path) -> anyhow::Result<SweepStats> {
-        info!(?root, "starting mtime sweep");
+    pub fn sweep(&self, root: &Path, max_depth: usize) -> anyhow::Result<SweepStats> {
+        info!(?root, max_depth, "starting mtime sweep");
 
         // Snapshot of (path → mtime) from the existing index.  Anything still in this
         // map after the walk is a stale entry (file deleted while the daemon was off).
@@ -86,6 +86,7 @@ impl FileIndex {
         let mut stats = SweepStats::default();
         for entry in WalkDir::new(root)
             .follow_links(false)
+            .max_depth(max_depth)
             .into_iter()
             .filter_entry(|e| !self.is_excluded(e.path()))
         {
@@ -118,8 +119,11 @@ impl FileIndex {
                 let term = Term::from_field_text(self.fields.path, &path_str);
                 writer.delete_term(term);
                 if let Some(doc) = self.make_document(path, &meta) {
-                    writer.add_document(doc).ok();
-                    stats.upserts += 1;
+                    if let Err(e) = writer.add_document(doc) {
+                        warn!(path = ?path, error = %e, "failed to add document");
+                    } else {
+                        stats.upserts += 1;
+                    }
                 }
             }
         }
@@ -151,8 +155,8 @@ impl FileIndex {
     /// Full re-crawl of `root` from scratch — wipes nothing but re-walks everything and
     /// re-indexes every file via delete-before-add.  Use this from the `Reindex` D-Bus
     /// method when the user wants a guaranteed-fresh state.
-    pub fn crawl(&self, root: &Path) -> anyhow::Result<usize> {
-        info!(?root, "starting full crawl");
+    pub fn crawl(&self, root: &Path, max_depth: usize) -> anyhow::Result<usize> {
+        info!(?root, max_depth, "starting full crawl");
         let mut writer = self
             .index
             .writer_with_num_threads(1, WRITER_HEAP_BYTES)
@@ -161,6 +165,7 @@ impl FileIndex {
         let mut count = 0usize;
         for entry in WalkDir::new(root)
             .follow_links(false)
+            .max_depth(max_depth)
             .into_iter()
             .filter_entry(|e| !self.is_excluded(e.path()))
         {
@@ -183,10 +188,11 @@ impl FileIndex {
             let path_str = path.to_string_lossy().to_string();
             let term = Term::from_field_text(self.fields.path, &path_str);
             writer.delete_term(term);
-            if let Some(doc) = self.make_document(path, &meta) {
-                writer.add_document(doc).ok();
-                count += 1;
-            }
+           if let Some(doc) = self.make_document(path, &meta) {
+                    if writer.add_document(doc).is_ok() {
+                        count += 1;
+                    }
+                }
         }
 
         writer.commit().context("committing crawl")?;
@@ -213,9 +219,11 @@ impl FileIndex {
             if !meta.is_file() {
                 continue;
             }
-            if let Some(doc) = self.make_document(path, &meta) {
-                writer.add_document(doc).ok();
-            }
+           if let Some(doc) = self.make_document(path, &meta) {
+                    if let Err(e) = writer.add_document(doc) {
+                        warn!(path = ?path, error = %e, "failed to add document");
+                    }
+                }
         }
         writer.commit()?;
         Ok(())
@@ -335,18 +343,32 @@ impl FileIndex {
     }
 
     fn build_query(&self, query: &str) -> Box<dyn Query> {
-        let term = Term::from_field_text(self.fields.filename, query);
-        let fuzzy = FuzzyTermQuery::new(term, 1, true);
+        let filename_fuzzy = FuzzyTermQuery::new(
+            Term::from_field_text(self.fields.filename, query),
+            1,
+            true,
+        );
+        let parent_fuzzy = FuzzyTermQuery::new(
+            Term::from_field_text(self.fields.parent, query),
+            1,
+            true,
+        );
 
         if query.contains('/') {
-            let path_term = Term::from_field_text(self.fields.path, query);
-            let exact = TermQuery::new(path_term, IndexRecordOption::Basic);
+            let path_exact = TermQuery::new(
+                Term::from_field_text(self.fields.path, query),
+                IndexRecordOption::Basic,
+            );
             Box::new(BooleanQuery::new(vec![
-                (Occur::Should, Box::new(fuzzy) as Box<dyn Query>),
-                (Occur::Should, Box::new(exact) as Box<dyn Query>),
+                (Occur::Should, Box::new(filename_fuzzy)),
+                (Occur::Should, Box::new(parent_fuzzy)),
+                (Occur::Should, Box::new(path_exact)),
             ]))
         } else {
-            Box::new(fuzzy)
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Should, Box::new(filename_fuzzy)),
+                (Occur::Should, Box::new(parent_fuzzy)),
+            ]))
         }
     }
 
@@ -384,9 +406,12 @@ mod tests {
     fn test_index(tmp: &TempDir) -> FileIndex {
         let config = IndexConfig {
             exclude_dirs: vec!["excluded".into(), "node_modules".into()],
+            max_depth: 10,
         };
         FileIndex::open(&tmp.path().join("idx"), config).unwrap()
     }
+
+    const TEST_MAX_DEPTH: usize = 10;
 
     #[test]
     fn crawl_and_search_finds_file() {
@@ -397,7 +422,7 @@ mod tests {
         std::fs::write(home.join("notes.md"), "hello world").unwrap();
 
         let idx = test_index(&tmp);
-        idx.crawl(&home).unwrap();
+        idx.crawl(&home, TEST_MAX_DEPTH).unwrap();
         idx.reload().unwrap();
 
         let hits = idx.search("rustacean", 10).unwrap();
@@ -415,7 +440,7 @@ mod tests {
         std::fs::write(home.join("visible.txt"), "visible").unwrap();
 
         let idx = test_index(&tmp);
-        idx.crawl(&home).unwrap();
+        idx.crawl(&home, TEST_MAX_DEPTH).unwrap();
         idx.reload().unwrap();
 
         assert!(idx.search("hidden", 10).unwrap().is_empty(), "excluded file must not appear");
@@ -454,7 +479,7 @@ mod tests {
         std::fs::write(home.join("beta.txt"), "b").unwrap();
 
         let idx = test_index(&tmp);
-        let stats = idx.sweep(&home).unwrap();
+        let stats = idx.sweep(&home, TEST_MAX_DEPTH).unwrap();
         idx.reload().unwrap();
 
         assert_eq!(stats.upserts, 2);
@@ -474,18 +499,18 @@ mod tests {
         std::fs::write(&beta, "b").unwrap();
 
         let idx = test_index(&tmp);
-        idx.sweep(&home).unwrap();
+        idx.sweep(&home, TEST_MAX_DEPTH).unwrap();
         idx.reload().unwrap();
 
         // Second sweep with no FS changes → zero work.
-        let stats = idx.sweep(&home).unwrap();
+        let stats = idx.sweep(&home, TEST_MAX_DEPTH).unwrap();
         assert_eq!(stats.upserts, 0);
         assert_eq!(stats.deletes, 0);
         assert_eq!(stats.scanned, 2);
 
         // Delete one file and re-sweep — the stale entry should be removed.
         std::fs::remove_file(&beta).unwrap();
-        let stats = idx.sweep(&home).unwrap();
+        let stats = idx.sweep(&home, TEST_MAX_DEPTH).unwrap();
         idx.reload().unwrap();
         assert_eq!(stats.upserts, 0);
         assert_eq!(stats.deletes, 1);
@@ -502,7 +527,7 @@ mod tests {
         std::fs::write(&gamma, "v1").unwrap();
 
         let idx = test_index(&tmp);
-        idx.sweep(&home).unwrap();
+        idx.sweep(&home, TEST_MAX_DEPTH).unwrap();
         idx.reload().unwrap();
 
         // Sleep past 1 s and rewrite so the OS bumps mtime to a strictly greater
@@ -510,8 +535,28 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         std::fs::write(&gamma, "v2-and-longer").unwrap();
 
-        let stats = idx.sweep(&home).unwrap();
+        let stats = idx.sweep(&home, TEST_MAX_DEPTH).unwrap();
         assert_eq!(stats.upserts, 1, "modified file should be re-indexed");
         assert_eq!(stats.deletes, 0);
+    }
+
+    #[test]
+    fn search_finds_file_by_parent_dir_name() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let docs = home.join("Documents");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("report.txt"), "content").unwrap();
+
+        let idx = test_index(&tmp);
+        idx.crawl(&home, TEST_MAX_DEPTH).unwrap();
+        idx.reload().unwrap();
+
+        let hits = idx.search("Documents", 10).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "searching parent dir name should find files inside it"
+        );
+        assert_eq!(hits[0].filename, "report.txt");
     }
 }

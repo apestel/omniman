@@ -34,14 +34,20 @@ async fn main() -> anyhow::Result<()> {
     let index_clone = Arc::clone(&file_index);
     let home = home_dir();
     let home_clone = home.clone();
+    let max_depth = config.index.max_depth;
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = index_clone.sweep(&home_clone) {
+        if let Err(e) = index_clone.sweep(&home_clone, max_depth) {
             tracing::error!("startup sweep failed: {e}");
         }
     });
 
-    let _watcher = watcher::spawn(Arc::clone(&file_index), home.clone(), Config::data_dir())
-        .context("creating file watcher")?;
+    let _watcher = watcher::spawn(
+        Arc::clone(&file_index),
+        home.clone(),
+        Config::data_dir(),
+        config.index.max_depth,
+    )
+    .context("creating file watcher")?;
 
     // ── Clipboard ─────────────────────────────────────────────────────────────
     let clip_db = Config::data_dir().join("clipboard.db");
@@ -85,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         ai_gemini,
         ai_openai,
         home: home.clone(),
+        max_depth: config.index.max_depth,
         sessions: dashmap::DashMap::new(),
     };
     let conn = zbus::connection::Builder::session()?
