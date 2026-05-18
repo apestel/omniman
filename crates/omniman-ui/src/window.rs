@@ -236,6 +236,10 @@ pub fn build(
     // Set while we perform a programmatic scroll so the value-changed handler
     // doesn't misread it as user intent.
     let scroll_lock: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // True while a conversation is being loaded into the thread pane.
+    // Suppresses the notify::upper auto-scroll so it doesn't race with
+    // the explicit scroll-to-bottom tick callback.
+    let loading_conv: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     let scroll_to_bottom: Rc<dyn Fn()> = {
         let scroll = thread_scroll.clone();
@@ -244,8 +248,16 @@ pub fn build(
         Rc::new(move || {
             let adj = scroll.vadjustment();
             if adj.page_size() <= 0.0 { return; }
+            let target = adj.upper() - adj.page_size();
+            tracing::debug!(
+                upper = adj.upper(),
+                page_size = adj.page_size(),
+                target,
+                old_value = adj.value(),
+                "scroll_to_bottom"
+            );
             lock.set(true);
-            adj.set_value(adj.upper() - adj.page_size());
+            adj.set_value(target);
             lock.set(false);
             at_bottom.set(true);
         })
@@ -259,14 +271,38 @@ pub fn build(
             move |a| {
                 if lock.get() { return; }
                 let bottom = (a.upper() - a.page_size()).max(0.0);
+                let was_at = at_bottom.get();
                 at_bottom.set(bottom < 1.0 || (bottom - a.value()).abs() < 1.0);
+                tracing::debug!(
+                    value = a.value(),
+                    upper = a.upper(),
+                    page_size = a.page_size(),
+                    bottom,
+                    was_at_bottom = was_at,
+                    now_at_bottom = at_bottom.get(),
+                    "value_changed"
+                );
             }
         });
         // Follow growing content during streaming (sticky-bottom).
         adj.connect_notify_local(Some("upper"), {
             let scroll_to_bottom = Rc::clone(&scroll_to_bottom);
             let at_bottom = Rc::clone(&at_bottom);
-            move |_, _| { if at_bottom.get() { scroll_to_bottom(); } }
+            let loading_conv = Rc::clone(&loading_conv);
+            let adj = adj.clone();
+            move |_, _| {
+                let should_scroll = !loading_conv.get() && at_bottom.get();
+                tracing::debug!(
+                    upper = adj.upper(),
+                    at_bottom = at_bottom.get(),
+                    loading_conv = loading_conv.get(),
+                    scrolling = should_scroll,
+                    "notify_upper"
+                );
+                if should_scroll {
+                    scroll_to_bottom();
+                }
+            }
         });
     }
 
@@ -308,6 +344,9 @@ pub fn build(
         let thread_box = thread_box.clone();
         let conv_list = conv_list.clone();
         let new_conv_title_row = Rc::clone(&new_conv_title_row);
+        let scroll_lock = Rc::clone(&scroll_lock);
+        let at_bottom = Rc::clone(&at_bottom);
+          let thread_scroll = thread_scroll.clone();
 
         Rc::new(move |text: String| -> bool {
             let text = text.trim().to_owned();
@@ -369,7 +408,32 @@ pub fn build(
             setup_text_tags(&buf);
             let dots = append_assistant_bubble(&thread_box, &buf);
             *pending_assistant.borrow_mut() = Some((buf, Some(dots)));
-            // Scroll follow is handled by the notify::upper handler when sticky.
+            // Force sticky-bottom so notify::upper follows growing content.
+            at_bottom.set(true);
+            // GTK4's layout pass doesn't run while the chat worker future is
+            // pending on the GLib main context, so the scrollbar's upper bound
+            // stays stale.  Manually increase upper by an estimated bubble height
+            // so the user can see their message.  GTK4's layout will correct the
+            // value when it eventually runs.
+            {
+                let adj = thread_scroll.vadjustment();
+                if adj.page_size() > 0.0 {
+                    let estimated_growth = 120.0; // two bubbles + spacing
+                    adj.set_upper(adj.upper() + estimated_growth);
+                    let target = adj.upper() - adj.page_size();
+                    tracing::debug!(
+                        upper_old = adj.upper() - estimated_growth,
+                        upper_new = adj.upper(),
+                        page_size = adj.page_size(),
+                        target,
+                        old_value = adj.value(),
+                        "estimate_scroll"
+                    );
+                    scroll_lock.set(true);
+                    adj.set_value(target);
+                    scroll_lock.set(false);
+                }
+            }
 
             if let Err(e) = chat_req_tx.try_send(ChatReq::NewTurn { conv_id, history }) {
                 tracing::warn!(conv_id, "chat_req channel full, dropping NewTurn: {e}");
@@ -386,11 +450,14 @@ pub fn build(
         let btn_ai = btn_ai.clone();
         let send_turn = Rc::clone(&send_turn);
         let current_conv_id = Rc::clone(&current_conv_id);
+        let thread_box = thread_box.clone();
+        let conv_list = conv_list.clone();
         move |_| {
             let query = search_entry.text().to_string();
             if query.trim().is_empty() { return; }
-            // Ask AI button always starts a new conversation
             current_conv_id.set(None);
+            clear_thread(&thread_box);
+            conv_list.unselect_all();
             btn_ai.set_active(true);
             send_turn(query);
         }
@@ -449,13 +516,15 @@ pub fn build(
         let send_turn = Rc::clone(&send_turn);
         let current_conv_id = Rc::clone(&current_conv_id);
         let search_entry = search_entry.clone();
+        let thread_box = thread_box.clone();
+        let conv_list = conv_list.clone();
         move |entry| {
             let query = entry.text().to_string();
             if query.trim().is_empty() { return; }
-            // Top entry always starts a new conversation
             current_conv_id.set(None);
+            clear_thread(&thread_box);
+            conv_list.unselect_all();
             btn_ai.set_active(true);
-            // Clear immediately so user sees the empty field
             search_entry.set_text("");
             send_turn(query);
         }
@@ -515,9 +584,13 @@ pub fn build(
         let stack = stack.clone();
         let at_bottom = Rc::clone(&at_bottom);
         let scroll_to_bottom = Rc::clone(&scroll_to_bottom);
+        let loading_conv = Rc::clone(&loading_conv);
+        let window = window.clone();
         move |_, row| {
             let conv_id = conv_id_from_row(row);
             current_conv_id.set(Some(conv_id));
+            // Suppress notify::upper auto-scroll while we rebuild the thread.
+            loading_conv.set(true);
             // Reset offset and force sticky mode for the new conversation.
             thread_scroll.vadjustment().set_value(0.0);
             at_bottom.set(true);
@@ -537,19 +610,26 @@ pub fn build(
             btn_ai.set_active(true);
             stack.set_visible_child_name("ai");
             chat_entry.grab_focus();
-            // Tick callbacks fire at the *end* of each rendered frame, when
-            // GTK has finished measuring & allocating everything for that
-            // frame. Wrapped TextViews need a couple of frames to converge,
-            // so we re-pin to the bottom for the first ~3 frames after a
-            // conversation load, then disconnect.
-            let remaining: Rc<Cell<u32>> = Rc::new(Cell::new(3));
-            thread_box.add_tick_callback({
+            // Tick callbacks fire after GTK's layout pass for each rendered
+            // frame.  Wrapped TextViews need a couple of frames to converge,
+            // so we re-pin to the bottom for up to 5 frames after a
+            // conversation load, then re-enable notify::upper auto-scroll.
+            // Attached to `window` (always visible) rather than `thread_box`
+            // (inside a Stack child that may not be enrolled in tick callbacks).
+            let remaining: Rc<Cell<u32>> = Rc::new(Cell::new(5));
+            let adj = thread_scroll.vadjustment();
+            window.add_tick_callback({
                 let scroll_to_bottom = Rc::clone(&scroll_to_bottom);
+                let loading_conv = Rc::clone(&loading_conv);
                 let remaining = Rc::clone(&remaining);
+                let adj = adj.clone();
                 move |_, _| {
-                    scroll_to_bottom();
+                    if adj.page_size() > 0.0 {
+                        scroll_to_bottom();
+                    }
                     let n = remaining.get();
                     if n <= 1 {
+                        loading_conv.set(false);
                         glib::ControlFlow::Break
                     } else {
                         remaining.set(n - 1);
