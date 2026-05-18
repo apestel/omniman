@@ -24,11 +24,49 @@ impl ClipboardStore {
                 kind       TEXT    NOT NULL,
                 content    TEXT    NOT NULL,
                 mime       TEXT    NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                encrypted  INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_clip_created
                 ON clip_entries (created_at DESC);",
         )?;
+
+        // Migration: add `encrypted` column if it doesn't exist yet.
+        let has_column: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('clip_entries') WHERE name = 'encrypted'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_column {
+            conn.execute(
+                "ALTER TABLE clip_entries ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+
+            // Best-effort: try to decrypt each entry so we can mark it correctly.
+            if let Some(enc) = &encryption {
+                let mut stmt = conn.prepare(
+                    "SELECT id, content FROM clip_entries WHERE encrypted = 0",
+                )?;
+                let rows: Vec<(i64, String)> = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                for (id, content) in rows {
+                    if let Ok(raw) = STANDARD.decode(&content) {
+                        if let Ok(decrypted) = enc.decrypt(&raw) {
+                            if String::from_utf8(decrypted).is_ok() {
+                                let _ = conn.execute(
+                                    "UPDATE clip_entries SET encrypted = 1 WHERE id = ?",
+                                    params![id],
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(Self { conn, encryption })
     }
 
@@ -36,12 +74,15 @@ impl ClipboardStore {
     /// Skips entirely if content is identical to the most recent entry.
     /// Returns `true` if the history changed (new row or reordering), `false` otherwise.
     pub fn insert(&self, kind: &str, content: &str, mime: &str) -> Result<bool> {
-        let encrypted = if let Some(enc) = &self.encryption {
-            enc.encrypt(content.as_bytes()).ok().map(|b| STANDARD.encode(&b))
+        let (stored_content, was_encrypted): (String, i32) = if let Some(enc) = &self.encryption {
+            if let Ok(encrypted_bytes) = enc.encrypt(content.as_bytes()) {
+                (STANDARD.encode(&encrypted_bytes), 1)
+            } else {
+                (content.to_string(), 0)
+            }
         } else {
-            None
+            (content.to_string(), 0)
         };
-        let stored_content = encrypted.as_deref().unwrap_or(content);
 
         let recent: Option<String> = self
             .conn
@@ -51,7 +92,7 @@ impl ClipboardStore {
                 |row| row.get(0),
             )
             .ok();
-        if recent.as_deref() == Some(stored_content) {
+        if recent.as_deref() == Some(&stored_content) {
             return Ok(false);
         }
         let now = std::time::SystemTime::now()
@@ -68,13 +109,13 @@ impl ClipboardStore {
             .ok();
         if let Some(id) = existing_id {
             self.conn.execute(
-                "UPDATE clip_entries SET created_at = ?1, kind = ?2, mime = ?3 WHERE id = ?4",
-                params![now, kind, mime, id],
+                "UPDATE clip_entries SET created_at = ?1, kind = ?2, mime = ?3, encrypted = ?4 WHERE id = ?5",
+                params![now, kind, mime, was_encrypted, id],
             )?;
         } else {
             self.conn.execute(
-                "INSERT INTO clip_entries (kind, content, mime, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![kind, stored_content, mime, now],
+                "INSERT INTO clip_entries (kind, content, mime, created_at, encrypted) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![kind, stored_content, mime, now, was_encrypted],
             )?;
         }
         Ok(true)
@@ -82,7 +123,7 @@ impl ClipboardStore {
 
     pub fn history(&self, limit: usize) -> Result<Vec<ClipEntry>> {
         let mut stmt = self.conn.prepare(
-                        "SELECT id, kind, content, mime, created_at
+                        "SELECT id, kind, content, mime, created_at, encrypted
                  FROM clip_entries
                  ORDER BY created_at DESC, id DESC
                  LIMIT ?1",
@@ -90,13 +131,24 @@ impl ClipboardStore {
         let entries = stmt
             .query_map(params![limit as i64], |row| {
                 let mut content: String = row.get(2)?;
-                if let Some(enc) = &self.encryption {
-                    if let Ok(raw) = STANDARD.decode(&content) {
-                        if let Ok(decrypted) = enc.decrypt(&raw) {
-                            if let Ok(text) = String::from_utf8(decrypted) {
-                                content = text;
+                let encrypted: i32 = row.get(5)?;
+                if encrypted == 1 {
+                    if let Some(enc) = &self.encryption {
+                        if let Ok(raw) = STANDARD.decode(&content) {
+                            if let Ok(decrypted) = enc.decrypt(&raw) {
+                                if let Ok(text) = String::from_utf8(decrypted) {
+                                    content = text;
+                                } else {
+                                    tracing::warn!(id = row.get::<_, i64>(0).unwrap_or(-1), "decrypted bytes are not valid UTF-8");
+                                }
+                            } else {
+                                tracing::warn!(id = row.get::<_, i64>(0).unwrap_or(-1), "failed to decrypt clipboard entry");
                             }
+                        } else {
+                            tracing::warn!(id = row.get::<_, i64>(0).unwrap_or(-1), "failed to base64-decode encrypted clipboard entry");
                         }
+                    } else {
+                        tracing::warn!(id = row.get::<_, i64>(0).unwrap_or(-1), "clipboard entry is encrypted but no key available");
                     }
                 }
                 Ok(ClipEntry {
@@ -134,8 +186,8 @@ mod tests {
 
     fn insert_at(store: &ClipboardStore, kind: &str, content: &str, mime: &str, ts: i64) {
         store.conn.execute(
-            "INSERT INTO clip_entries (kind, content, mime, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![kind, content, mime, ts],
+            "INSERT INTO clip_entries (kind, content, mime, created_at, encrypted) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![kind, content, mime, ts, 0],
         ).unwrap();
     }
 
