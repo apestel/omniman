@@ -1722,7 +1722,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "wl-clipboard-rs",
  "zbus",
 ]
 

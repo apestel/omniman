@@ -704,20 +704,14 @@ pub fn build(
     });
 
     // ── Clipboard row activation → wl-copy ───────────────────────────────────
-    clip_list.connect_row_activated(|_, row| {
-        if let Some(ar) = row.downcast_ref::<libadwaita::ActionRow>() {
-            if let Some(content) = ar.subtitle() {
-                let text = content.as_str().to_string();
-                std::thread::spawn(move || {
-                    use wl_clipboard_rs::copy::{MimeType, Options, Source};
-                    let opts = Options::new();
-                    if let Err(e) = opts.copy(
-                        Source::Bytes(text.into_bytes().into()),
-                        MimeType::Text,
-                    ) {
-                        tracing::warn!("clipboard set failed: {e}");
-                    }
-                });
+    let clipboard = window.clipboard();
+    clip_list.connect_row_activated({
+        let clipboard = clipboard.clone();
+        move |_, row| {
+            if let Some(ar) = row.downcast_ref::<libadwaita::ActionRow>() {
+                if let Some(content) = ar.subtitle() {
+                    clipboard.set_text(content.as_str());
+                }
             }
         }
     });
